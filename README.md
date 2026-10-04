@@ -2,7 +2,7 @@
 
 A checkpoint workflow and restricted Android build/test integration for a local OpenClaw agent. The skill explains what the agent should do; the controller enforces the available operations and their limits.
 
-This repository contains a publication copy of stage 4AO final2 source, its tests, and a handoff for continued work. It is a development snapshot of a specific Mac Studio installation, not a portable one-command installer. Read [the handoff](docs/HANDOFF.md), [observed test results](docs/TEST_RESULTS.md), and [next-test instructions](docs/NEXT_TEST.md) before continuing.
+This repository contains source, tests, and a handoff for continued work. The current source is **stage 4AP candidate 1**: the publication copy of the deployed stage 4AO final2 source, plus fixture-tested fixes for the latest trial's tap and observation failures. The candidate is not deployed or live-tested. It is a development snapshot of a specific Mac Studio installation, not a portable one-command installer. Read [the handoff](docs/HANDOFF.md), [observed test results](docs/TEST_RESULTS.md), and [next-test instructions](docs/NEXT_TEST.md) before continuing.
 
 ## Contents
 
@@ -13,13 +13,15 @@ This repository contains a publication copy of stage 4AO final2 source, its test
 - `android-chat-bridge/INTEGRATION.md`: workflow and enforcement boundaries.
 - `android-chat-bridge/transfer-manifest.json`: SHA-256 fingerprints for the 45 published source files in this snapshot.
 
-The public source-manifest fingerprint is `e088143b83c78e5e1c6844cd37d82893ebc91584b51e565dfd1974014896f835`. Machine-specific paths and account names have been replaced with `/CONFIGURE/...` placeholders, and original volume identity values removed. This publication copy is intentionally not ready to deploy. [Source provenance](docs/SOURCE_PROVENANCE.json) distinguishes it from the unchanged installed source. The repository documentation is additional to that source snapshot. Private trial histories, notes, machine configuration, installation backups, screenshots, generated APKs and emulator disks are not included.
+The current source-manifest fingerprint is `45af1306bffe3c022dff0af8ee04e53edd62588d57394360d99aaa7424e5a13f` (stage 4AP candidate 1). The deployed stage 4AO final2 publication copy had `e088143b83c78e5e1c6844cd37d82893ebc91584b51e565dfd1974014896f835`; [source versions](docs/SOURCE_VERSIONS.json) records both and the changed files. Machine-specific paths and account names have been replaced with `/CONFIGURE/...` placeholders, and original volume identity values removed. This publication copy is intentionally not ready to deploy. [Source provenance](docs/SOURCE_PROVENANCE.json) distinguishes the stage 4AO final2 copy from the unchanged installed source. The repository documentation is additional to that source snapshot. Private trial histories, notes, machine configuration, installation backups, screenshots, generated APKs and emulator disks are not included.
 
 ## Workflow
 
 Read the skill, preserve the complete requested outcome, prepare one job, and save/read back its checkpoint. Write a compact first source revision and build it early. Use compiler errors to repair within the same job, then build again before calling a repair verified. Install the qualified APK, observe the actual screen, exercise the requested behavior, and retain the results. Finish with a verified stop and final checkpoint readback.
 
 Every work action reuses the `jobId` returned by `prepare`. Source inputs are complete Java classes under the fixed `org.openclaw.trial` scaffold. Build the UI in Java using the prepared Android framework APIs; custom XML resources, AppCompat and new external dependencies are not supported by this route.
+
+Tap coordinates are actual pixels of the display reported by `start_test`. In the stage 4AP candidate, each observation also lists the visible text and controls with their tap centers (`uiSummary`). An out-of-display tap is refused without stopping the guest or requiring a rebuild.
 
 ## Time budgets
 
@@ -38,7 +40,7 @@ python3 -B -m unittest discover -s android-chat-bridge -p 'test_*.py' -v
 node --test android-chat-bridge/plugin/test_plugin.mjs
 ```
 
-The source suites previously passed 198 Python and 44 Node tests on the Studio; detailed scope and the fresh model trial are in [TEST_RESULTS.md](docs/TEST_RESULTS.md). Python 3.9 and 3.14 were also used for the retained local source validation. Passing fixtures does not establish autonomous app completion.
+The deployed stage 4AO final2 suites passed 198 Python and 44 Node tests on the Studio; detailed scope and the fresh model trial are in [TEST_RESULTS.md](docs/TEST_RESULTS.md). The stage 4AP candidate passes 212 Python tests (on Python 3.9 through 3.13) and 46 Node tests in a Linux container. Passing fixtures does not establish autonomous app completion.
 
 ## Deployment prerequisites and limits
 

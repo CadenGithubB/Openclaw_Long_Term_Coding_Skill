@@ -66,6 +66,12 @@ below do not apply to this route. Do not probe host paths or spawn another write
    `observe`. Inspect actual screens and observations against
    every retained behavior, including gameplay for games. Launch or delivered
    input alone proves no behavior. Keep unobserved checks incomplete.
+   `uiSummary` (a tap's `afterUiSummary`) lists visible text and controls with
+   bounds and centers; it is captured after its screenshot, so a launch frame may
+   still show a splash. Observe again when they disagree. Tap a control's `center`
+   in actual pixels of the reported display (`0 <= x < width`, `0 <= y < height`);
+   never scale into the schema's 0–8192 bound. An outside tap is refused without
+   input or guest stop: correct it with the same `jobId`, without a rebuild.
 6. **Leave time to finish safely.** Read receipt counters, source qualification
    and remaining controller time when provided. The chat/runtime deadline may
    already be fixed and shorter; choosing a job budget does not extend the current

@@ -1,15 +1,15 @@
 {
-  "INTEGRATION.md": "aaf0158131dce3eb887e92e6aad96b65bd987ab59dfa8343b5bf7c5cce251969",
-  "bridge.py": "336e495362f3b86c477d21590acca0e14034e642e2b56730813a8f6aa0de12b5",
-  "emulator_adapter.py": "f3691dd3e126e52491ca273f0e2b935f293035d5773e66ba7dbfac6a12b70ee2",
+  "INTEGRATION.md": "6d02be80eb19b16314cfc625a5838ca3024e38503a41b687ddadce5ee8cad072",
+  "bridge.py": "78651ed74259a28fd6dda35febf67fbd50270f822ae23c96d0b14bca2d3d6621",
+  "emulator_adapter.py": "48cb36021dfc3858d0071f38380b599e8bdba34610ffd5a722d13538bfe2e00b",
   "install.py": "a7c5572d9df9aee7cb52903aa050a0e6b44d52b8d4ce2920ecf532da2c79758b",
-  "plugin/index.js": "a6649c6a3a5c707df53cb1947ce1d71a456806753712320c298a5f8018bbab2a",
+  "plugin/index.js": "3a2fbfb9afc331430fb03c4de1eeec9ae8aac39635c1d529d55b5b6d5fe62490",
   "plugin/openclaw.plugin.json": "10bbf669dfff403543487f44b309251d9ad4f2fbe61cbf1febfca5533f81eebc",
   "plugin/package.json": "89cd6dfd29f260db2594358c75875932297818a665c181b540a7b4c02deeb18d",
-  "plugin/test_plugin.mjs": "d5e17581b26a5fc858607ac78152bfe3038532a6dc16b85a1a30d9d9014dcb46",
+  "plugin/test_plugin.mjs": "a5f2e106eb57af14fd15f866eb26861e64b87e3f74e8a58e436363fb8c9dfbf8",
   "prior-skill-files.json": "1c4d100bf21de25531e2027b6e5188cf338e2264894036cf26eefdaacb69035d",
-  "report.py": "e2df52b0004b3c4c78c9b3a773cc8ca43d48cec3b89d73476d158105344638cf",
-  "skill/long-task-runner/SKILL.md": "19b68e7fd23b90b8f9e2b83efbf2c22588d327e3cb675d8ba52e07e018365044",
+  "report.py": "c9ba4969fd4ff81d67831f5bd7b6c6e0257b92a7b4fdc9e4af8178a4f3f1b841",
+  "skill/long-task-runner/SKILL.md": "7d6637bcfb804d8956a941389449e071676d09edbe6c83fe03566fec04c782e8",
   "skill/long-task-runner/examples/android-contract.json": "f115befad2c4ca369c8b579f11c4fbc54c11f9fd78cf8b00c2c7400314783406",
   "skill/long-task-runner/examples/android-game-contract.json": "742057089078899c1b252c590f6c22ef75faf4d5d332efd0eff8b601cb6c1c31",
   "skill/long-task-runner/examples/android-game-pending-input.json": "9ccb49cb4a8f76ae80c3fa10571ca1678fb7406e1ccb46ba7461ad90ea963a9a",
@@ -41,7 +41,7 @@
   "skill/long-task-runner/scripts/task_runner.py": "b5698129aab9d99f313af1d570eb67b9aaa8a469220c31c4909827b6a51cb04e",
   "skill/long-task-runner/scripts/task_store.py": "aed5d670e1d85beb6f429a12b9f468fc7c05e16f3c1d17a75113f38a13447b9f",
   "skill/long-task-runner/scripts/work_step.py": "8a29e16000a6bcc277a689d4157e17760fb4afe75a07fef21f3e2ee5955fb879",
-  "test_bridge.py": "7d17595d6f4f7f867dca61b832c4143e7b4c2f0532b8636ed4a94291c674bf37",
-  "test_emulator_adapter.py": "7504e0b3e89b6e182341b44e56db3d1c1b4f793be559e2752be6ea77bb81c283",
-  "test_report.py": "c407f1f05bbb24090357bb467c7b727849a688e822aaf8856c866b9121ef56d3"
+  "test_bridge.py": "f32ab2f029690535fa51c182c225428c72b1925ec7d798188a7d37d48a5bc1a5",
+  "test_emulator_adapter.py": "0cbb73602778e377131fa6510e7e79ea46daa0cb6dddb4f8e5bb3e4af641dfe5",
+  "test_report.py": "9ffef41a4df8f9708daa40f5d5c5c54752d56f2a9fc7aa1b158164ad7f4124cd"
 }

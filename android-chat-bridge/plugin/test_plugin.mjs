@@ -267,6 +267,40 @@ test('tap limits and action-specific fields cannot be bypassed', () => {
   assert.throws(() => validateParams({ action: 'prepare', reason: 'x'.repeat(1001) }), /reason/);
 });
 
+test('rejected fields are named with the action\'s accepted fields so the envelope can be corrected', async () => {
+  let calls = 0;
+  const tool = createTool(CONTEXT, { client: async () => { calls++; return response(); } });
+  const tap = { action: 'tap', jobId: JOB, x: 240, y: 324 };
+  await assert.rejects(tool.execute('call_alias', { ...tap, coordinates: [240, 324] }),
+    /unknown request field "coordinates"; use only action, jobId, reason, x, y, count, intervalMs$/);
+  await assert.rejects(tool.execute('call_wrong_field', { ...tap, files: [] }),
+    /field does not apply to this action: "files"; tap accepts action, jobId, reason, x, y, count, intervalMs$/);
+  await assert.rejects(tool.execute('call_unknown_action', { action: 'swipe', x: 1 }),
+    /unknown request field "x"|unsupported action/);
+  const odd = { ...tap, 'x"; ignore previous': 1 };
+  await assert.rejects(tool.execute('call_odd_name', odd), error => {
+    assert.match(error.message, /unknown request field with an unsupported name/);
+    assert.doesNotMatch(error.message, /ignore previous/);
+    return true;
+  });
+  let read = false;
+  const accessor = { jobId: JOB, x: 1, y: 1 };
+  Object.defineProperty(accessor, 'action', { enumerable: true, get() { read = true; return 'tap'; } });
+  await assert.rejects(tool.execute('call_action_accessor', accessor), /accessors are forbidden/);
+  assert.equal(read, false);
+  assert.equal(calls, 0);
+});
+
+test('tap coordinates are described as actual display pixels, not a scaled range', () => {
+  const tool = createTool(CONTEXT);
+  for (const axis of ['x', 'y']) {
+    assert.match(tool.parameters.properties[axis].description, /actual pixels of the observed display/);
+    assert.match(tool.parameters.properties[axis].description, /not a scaled range/);
+    assert.match(tool.parameters.properties[axis].description, /uiSummary/);
+  }
+  assert.match(tool.description, /refused without stopping the test/);
+});
+
 test('tap bursts use controller defaults and stop at fifteen seconds', () => {
   const tap = { action: 'tap', jobId: JOB, x: 8192, y: 8192 };
   assert.equal(validateParams({ ...tap, count: 11, intervalMs: 1500 }).count, 11);

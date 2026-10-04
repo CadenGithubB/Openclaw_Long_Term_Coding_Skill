@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
+from xml.etree import ElementTree
 
 SDK = Path('/CONFIGURE/android-sdk')
 PORT, ADB_PORT, GRPC_PORT = 5580, 5038, 5582
@@ -19,6 +20,13 @@ MAX_OUTPUT = 8 * 1024 * 1024
 PNG = b'\x89PNG\r\n\x1a\n'
 STOP_GROUP_GRACE_SECONDS = 2.0
 STOP_GROUP_MAX_OBSERVATIONS = 21
+UI_TREE_LIMIT = 2 * 1024 * 1024
+UI_NODE_LIMIT = 4000
+UI_DEPTH_LIMIT = 96
+UI_ELEMENT_LIMIT = 60
+UI_TEXT_LIMIT = 160
+PACKAGE_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+')
+BOUNDS = re.compile(r'\[(-?[0-9]{1,6}),(-?[0-9]{1,6})\]\[(-?[0-9]{1,6}),(-?[0-9]{1,6})\]')
 
 
 class EmulatorError(RuntimeError):
@@ -28,6 +36,89 @@ class EmulatorError(RuntimeError):
 def require(value, message):
     if not value:
         raise EmulatorError(message)
+
+
+def ui_text(value):
+    return ' '.join(''.join(c if c.isprintable() else ' ' for c in value).split())[:UI_TEXT_LIMIT]
+
+
+def summarize_ui(raw, size, package):
+    """List visible text and controls from untrusted guest view-tree XML.
+
+    Bounds and centers are the dump's own display pixels. This is observation
+    data for the model to compare with the request, never a behavioral verdict.
+    """
+    require(isinstance(raw, bytes) and len(raw) <= UI_TREE_LIMIT, 'view tree exceeds the summary byte limit')
+    # uiautomator emits no declarations; refusing them excludes entity expansion.
+    require(b'<!' not in raw, 'view tree declarations refused')
+    width, height = size
+    parser = ElementTree.XMLPullParser(events=('start', 'end'))
+    elements, packages = [], []
+    nodes = depth = omitted = 0
+    rotation = None
+    seen_root = app_present = False
+    for offset in range(0, len(raw), 16384):
+        parser.feed(raw[offset:offset + 16384])
+        for event, node in parser.read_events():
+            if event == 'end':
+                depth -= 1
+                continue
+            depth += 1
+            require(depth <= UI_DEPTH_LIMIT, 'view tree depth limit')
+            if not seen_root:
+                require(node.tag == 'hierarchy', 'view tree root is not a hierarchy')
+                seen_root = True
+                value = node.get('rotation', '')
+                rotation = int(value) if value in ('0', '1', '2', '3') else None
+                continue
+            require(node.tag == 'node', 'unexpected view tree element')
+            nodes += 1
+            require(nodes <= UI_NODE_LIMIT, 'view tree node limit')
+            owner = node.get('package', '')
+            owner = owner if len(owner) <= 120 and PACKAGE_NAME.fullmatch(owner) else ''
+            app_present = app_present or owner == package
+            if owner and owner not in packages and len(packages) < 8:
+                packages.append(owner)
+            text, description = ui_text(node.get('text', '')), ui_text(node.get('content-desc', ''))
+            clickable = node.get('clickable') == 'true'
+            match = BOUNDS.fullmatch(node.get('bounds', ''))
+            if not (text or description or clickable) or not match:
+                continue
+            left, top, right, bottom = map(int, match.groups())
+            if right <= left or bottom <= top:
+                continue  # Zero-area views are not visible tap targets.
+            if len(elements) == UI_ELEMENT_LIMIT:
+                omitted += 1
+                continue
+            center = [(left + right) // 2, (top + bottom) // 2]
+            item = {'bounds': [left, top, right, bottom], 'center': center,
+                    'centerOnDisplay': 0 <= center[0] < width and 0 <= center[1] < height}
+            kind = node.get('class', '')
+            if len(kind) <= 120 and re.fullmatch(r'[A-Za-z0-9_.$]+', kind):
+                item['class'] = kind
+            if text:
+                item['text'] = text
+            if description:
+                item['contentDescription'] = description
+            identifier = node.get('resource-id', '')
+            if len(identifier) <= 120 and re.fullmatch(r'[A-Za-z0-9_.:/]+', identifier):
+                item['resourceId'] = identifier
+            if clickable:
+                item['clickable'] = True
+            if node.get('enabled') == 'false':
+                item['enabled'] = False
+            if node.get('checked') == 'true':
+                item['checked'] = True
+            if owner and owner != package:
+                item['package'] = owner
+            elements.append(item)
+    parser.close()
+    require(seen_root, 'view tree root is missing')
+    return {'status': 'summarized', 'display': [width, height], 'rotation': rotation,
+            'appPackagePresent': app_present, 'packages': packages, 'nodeCount': nodes,
+            'elements': elements, 'elementsOmitted': omitted,
+            'note': 'Untrusted guest view-tree data. Bounds and centers are actual display pixels. '
+                    'Text and controls listed here are what the guest reported at this capture; compare them with the request yourself.'}
 
 
 def fingerprint(path):
@@ -222,12 +313,9 @@ class EmulatorSession:
                     fatalMarkers=len(re.findall(r'FATAL EXCEPTION|Fatal signal', text)),
                     scope='entire disposable guest crash buffer; not a gameplay verdict', **self._stamp())
 
-    def _observe(self, label):
-        require(isinstance(label, str) and re.fullmatch('[a-zA-Z0-9_-]{1,40}', label), 'invalid observation label')
-        require(self._started, 'test not started')
-        result = {'action': 'observe', 'label': label, **self._stamp()}
-        # Capture first: Canvas animation can keep UI Automator from becoming idle.
-        result['screenshot'] = self._capture(label)
+    def _ui(self, label, screenshot):
+        """Dump the view tree after its screenshot; an unavailable tree is retained, not fatal."""
+        started = self._stamp()
         try:
             # A unique guest path prevents a nominally successful dump command
             # from returning an earlier observation's XML after an idle failure.
@@ -235,10 +323,27 @@ class EmulatorSession:
             self._adb(['shell', 'uiautomator', 'dump', guest_xml], timeout=5)
             raw = self._adb(['exec-out', 'cat', guest_xml], timeout=5)
             require(raw.lstrip().startswith(b'<?xml') or raw.lstrip().startswith(b'<hierarchy'), 'invalid UI XML')
-            result['ui'] = self._artifact(label + '.xml', raw)
+            ui = dict(self._artifact(label + '.xml', raw), dumpStartedAtMs=started['atMs'], **self._stamp())
         except (EmulatorError, subprocess.TimeoutExpired) as error:
-            result['ui'] = {'status': 'unavailable', 'reason': str(error)[:1000]}
+            ui = {'status': 'unavailable', 'reason': str(error)[:1000], 'dumpStartedAtMs': started['atMs'], **self._stamp()}
+            summary = {'status': 'unavailable', 'reason': 'No view tree was captured; use the screenshot or observe again.'}
+        else:
+            try:
+                summary = summarize_ui(raw, self.size, self.package)
+            except Exception as error:  # Advisory text only; never fail the guest action.
+                summary = {'status': 'unavailable', 'reason': 'The view tree could not be summarized: ' + str(error)[:300]}
+        # The tree and its screenshot are separate captures, never one instant.
+        summary['capturedAfterScreenshotMs'] = int(round((ui['monotonic'] - screenshot['monotonic']) * 1000))
         self._ensure()
+        return ui, summary
+
+    def _observe(self, label):
+        require(isinstance(label, str) and re.fullmatch('[a-zA-Z0-9_-]{1,40}', label), 'invalid observation label')
+        require(self._started, 'test not started')
+        result = {'action': 'observe', 'label': label, **self._stamp()}
+        # Capture first: Canvas animation can keep UI Automator from becoming idle.
+        result['screenshot'] = self._capture(label)
+        result['ui'], result['uiSummary'] = self._ui(label, result['screenshot'])
         result['packagePids'] = self._adb(['shell', 'pidof', self.package], check=False).decode('utf-8', 'replace').strip()
         require(not result['packagePids'] or re.fullmatch(r'[0-9]+(?: [0-9]+)*', result['packagePids']), 'invalid package PID observation')
         result['crashes'] = self._crashes(label)
@@ -404,6 +509,7 @@ showDeviceFrame=no
                     if count >= 4 and index in {count // 3, 2 * count // 3}:
                         result['intermediateFrames'].append(self._capture('tap-intermediate'))
                 result['after'] = self._capture('tap-after')
+                result['afterUi'], result['afterUiSummary'] = self._ui('tap-after', result['after'])
                 result['status'] = 'returned'
                 self._flush()
                 return result

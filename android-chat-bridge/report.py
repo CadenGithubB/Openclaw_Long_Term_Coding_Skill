@@ -205,9 +205,9 @@ def write_report(job_dir, state):
             artifact(str(Path(path).parent / 'session.json'), 'Emulator action and cleanup journal')
         if 'fatalMarkers' in value:
             crash_records.append(count(value['fatalMarkers']))
-        if label.endswith('ui') and value.get('status') == 'unavailable':
+        if label.lower().endswith('ui') and value.get('status') == 'unavailable':
             xml_unavailable += 1
-        for key in ('initialObservation', 'screenshot', 'ui', 'crashes', 'beforeLaunchCrashes', 'before', 'after'):
+        for key in ('initialObservation', 'screenshot', 'ui', 'crashes', 'beforeLaunchCrashes', 'before', 'after', 'afterUi'):
             collect(value.get(key), 'Android evidence — ' + key, depth + 1)
         items = value.get('intermediateFrames')
         if isinstance(items, list):

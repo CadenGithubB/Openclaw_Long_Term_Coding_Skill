@@ -21,6 +21,30 @@ def png(width=480, height=800):
             + chunk(b'IDAT', zlib.compress((b'\0' + b'\xff' * width * 3) * height)) + chunk(b'IEND', b''))
 
 
+def node(text='', bounds='[0,0][480,800]', cls='android.widget.TextView', clickable='false', package='org.openclaw.trial',
+         desc='', children='', **extra):
+    attributes = dict(index='0', text=text, **{'resource-id': ''}, **{'class': cls}, package=package,
+                      **{'content-desc': desc}, checkable='false', checked='false', clickable=clickable,
+                      enabled='true', focusable=clickable, focused='false', scrollable='false',
+                      **{'long-clickable': 'false'}, password='false', selected='false', bounds=bounds)
+    attributes.update(extra)
+    rendered = ' '.join('%s="%s"' % (key, value) for key, value in attributes.items())
+    return '<node %s>%s</node>' % (rendered, children) if children else '<node %s />' % rendered
+
+
+def hierarchy(*children):
+    body = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">%s</hierarchy>" % ''.join(children)
+    return body.encode()
+
+
+# Shape of an actual uiautomator dump for a native-view counter at 480x800.
+COUNTER = hierarchy(node(cls='android.widget.FrameLayout', children=node(
+    cls='android.widget.LinearLayout', bounds='[0,24][480,800]', children=''.join((
+        node('0', '[0,200][480,264]'),
+        node('Increment', '[160,300][320,348]', 'android.widget.Button', 'true'),
+        node('Reset', '[160,360][320,408]', 'android.widget.Button', 'true'))))))
+
+
 class Clock:
     def __init__(self):
         self.value = 100.0
@@ -72,6 +96,7 @@ class Session(adapter.EmulatorSession):
         self.tap_entered = threading.Event()
         self.tap_released = threading.Event()
         self.slow_tap = 0
+        self.ui_xml = b'<?xml version="1.0"?><hierarchy/>'
         super().__init__(*args, **kwargs)
 
     def _spawn(self, command, name, service=False):
@@ -121,7 +146,8 @@ class Session(adapter.EmulatorSession):
                 raise adapter.EmulatorError('ADB command deadline exceeded')
             return b'UI hierarchy dumped\n'
         if args[:2] == ['exec-out', 'cat']:
-            return b'<?xml version="1.0"?><hierarchy/>'
+            self.clock.value += .25  # A tree dump completes after its screenshot.
+            return self.ui_xml
         if args[:2] == ['shell', 'pidof']:
             return b'' if self.startup_crash else b'321\n'
         if args[:3] == ['shell', 'input', 'tap']:
@@ -507,6 +533,116 @@ class AdapterTests(unittest.TestCase):
         self.assertIn(proc.pid, session.terminated)
         self.assertNotIn(item, session._children)
         self.assertTrue(all(service['process'].poll() is None for service in session._services))
+
+    def test_observation_summarizes_visible_text_controls_and_actual_pixel_centers(self):
+        session = self.session()
+        session.ui_xml = COUNTER
+        launch = session.start()['initialObservation']
+        summary = launch['uiSummary']
+        self.assertEqual(summary['status'], 'summarized')
+        self.assertEqual(summary['display'], [480, 800])
+        self.assertTrue(summary['appPackagePresent'])
+        self.assertEqual(summary['packages'], ['org.openclaw.trial'])
+        self.assertEqual(summary['nodeCount'], 5)
+        by_text = {item.get('text'): item for item in summary['elements']}
+        self.assertEqual(set(by_text), {'0', 'Increment', 'Reset'})
+        self.assertEqual(by_text['Increment']['center'], [240, 324])
+        self.assertEqual(by_text['Reset']['center'], [240, 384])
+        self.assertEqual(by_text['Increment']['bounds'], [160, 300, 320, 348])
+        self.assertTrue(by_text['Increment']['clickable'])
+        self.assertNotIn('clickable', by_text['0'])
+        self.assertTrue(all(item['centerOnDisplay'] for item in summary['elements']))
+        self.assertNotIn('package', by_text['0'], 'app-owned elements omit the repeated package name')
+        # Separate captures are timed separately and never presented as one instant.
+        self.assertEqual(summary['capturedAfterScreenshotMs'], 250)
+        self.assertGreater(launch['ui']['monotonic'], launch['screenshot']['monotonic'])
+        self.assertIn('dumpStartedAtMs', launch['ui'])
+        self.assertEqual(Path(launch['ui']['path']).read_bytes(), COUNTER)
+        self.assertNotIn('passed', json.dumps(summary))
+
+    def test_tap_receipt_includes_tree_captured_after_its_after_frame(self):
+        session = self.session()
+        session.start()
+        session.ui_xml = hierarchy(node('1', '[0,200][480,264]'))
+        receipt = session.tap(240, 324)
+        self.assertEqual(receipt['status'], 'returned')
+        self.assertEqual(receipt['afterUiSummary']['elements'][0]['text'], '1')
+        self.assertTrue(Path(receipt['afterUi']['path']).name.endswith('tap-after.xml'))
+        self.assertGreater(receipt['afterUi']['monotonic'], receipt['after']['monotonic'])
+        dumps = [c for c in session.commands if c[:3] == ['shell', 'uiautomator', 'dump']]
+        self.assertEqual(len(dumps), 2)
+        self.assertEqual(len({c[3] for c in dumps}), 2)
+
+    def test_unavailable_tree_after_tap_keeps_guest_and_tap_receipt(self):
+        session = self.session()
+        session.start()
+        session.ui_failure = True
+        receipt = session.tap(240, 324)
+        self.assertEqual(receipt['status'], 'returned')
+        self.assertEqual(receipt['afterUi']['status'], 'unavailable')
+        self.assertEqual(receipt['afterUiSummary']['status'], 'unavailable')
+        self.assertTrue(Path(receipt['after']['path']).exists())
+        self.assertFalse(session._stopping)
+
+    def test_unsafe_or_malformed_trees_are_retained_but_not_summarized(self):
+        deep = b'<hierarchy rotation="0">' + b'<node>' * (adapter.UI_DEPTH_LIMIT + 1) + b'</node>' * (adapter.UI_DEPTH_LIMIT + 1) + b'</hierarchy>'
+        cases = {
+            'entity': b'<?xml version="1.0"?><!DOCTYPE h [<!ENTITY a "aaaa">]><hierarchy>&a;</hierarchy>',
+            'malformed': b'<?xml version="1.0"?><hierarchy><node text="0"></hierarchy>',
+            'depth': deep,
+            'nodes': b'<hierarchy>' + b'<node />' * (adapter.UI_NODE_LIMIT + 1) + b'</hierarchy>',
+            'root': b'<?xml version="1.0"?><other><node text="0" /></other>',
+            'element': b'<hierarchy><script /></hierarchy>',
+        }
+        for name, raw in cases.items():
+            session = self.session()
+            session.start()
+            session.ui_xml = raw
+            receipt = session.observe('case')
+            with self.subTest(case=name):
+                self.assertEqual(receipt['uiSummary']['status'], 'unavailable')
+                self.assertNotIn('elements', receipt['uiSummary'])
+                self.assertEqual(Path(receipt['ui']['path']).read_bytes(), raw)
+                self.assertFalse(session._stopping)
+            session.stop()
+
+    def test_summary_bounds_text_and_reports_omitted_or_offscreen_controls(self):
+        many = [node('Item %d' % i, '[0,%d][480,%d]' % (i, i + 1)) for i in range(adapter.UI_ELEMENT_LIMIT + 5)]
+        raw = hierarchy(
+            node('A&#9;B‮&#10;' + 'x' * 400, '[0,0][480,40]'),
+            node('', '[0,0][0,0]', clickable='true'),
+            node('', '[600,900][700,1000]', 'android.widget.Button', 'true', desc='Offscreen'),
+            node('Clock', '[0,0][100,24]', package='com.android.systemui'),
+            node('', '[0,0][480,800]', cls='bad class;name'),
+            *many)
+        summary = adapter.summarize_ui(raw, (480, 800), 'org.openclaw.trial')
+        first = summary['elements'][0]
+        self.assertTrue(first['text'].startswith('A B '))
+        self.assertEqual(len(first['text']), adapter.UI_TEXT_LIMIT)
+        self.assertTrue(all(ch.isprintable() for item in summary['elements'] for ch in item.get('text', '')))
+        offscreen = summary['elements'][1]
+        self.assertEqual(offscreen['contentDescription'], 'Offscreen')
+        self.assertFalse(offscreen['centerOnDisplay'])
+        self.assertEqual(summary['elements'][2]['package'], 'com.android.systemui')
+        self.assertEqual(len(summary['elements']), adapter.UI_ELEMENT_LIMIT)
+        self.assertEqual(summary['elementsOmitted'], 8)
+        self.assertNotIn([0, 0, 0, 0], [item['bounds'] for item in summary['elements']])
+        self.assertTrue(summary['appPackagePresent'])
+        self.assertLess(len(json.dumps(summary)), 32 * 1024)
+
+    def test_app_package_presence_is_not_limited_by_package_listing(self):
+        others = [node('x', package='com.example.p%d' % i) for i in range(10)]
+        summary = adapter.summarize_ui(hierarchy(*others, node('0')), (480, 800), 'org.openclaw.trial')
+        self.assertEqual(len(summary['packages']), 8)
+        self.assertNotIn('org.openclaw.trial', summary['packages'])
+        self.assertTrue(summary['appPackagePresent'])
+        absent = adapter.summarize_ui(hierarchy(*others), (480, 800), 'org.openclaw.trial')
+        self.assertFalse(absent['appPackagePresent'])
+
+    def test_oversized_tree_is_refused_before_parsing(self):
+        with patch.object(adapter.ElementTree, 'XMLPullParser', side_effect=AssertionError('parsed')):
+            with self.assertRaisesRegex(adapter.EmulatorError, 'byte limit'):
+                adapter.summarize_ui(b' ' * (adapter.UI_TREE_LIMIT + 1), (480, 800), 'org.openclaw.trial')
 
     def test_listener_inventory_rejects_an_unrelated_process_group(self):
         session = self.session()

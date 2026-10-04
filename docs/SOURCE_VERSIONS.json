@@ -1,0 +1,50 @@
+{
+  "currentRepositorySource": "stage4AP-candidate1",
+  "deployedSource": "stage4AO-final2",
+  "versions": [
+    {
+      "version": "stage4AO-final2",
+      "record": "SOURCE_PROVENANCE.json",
+      "publicSourceManifestSha256": "e088143b83c78e5e1c6844cd37d82893ebc91584b51e565dfd1974014896f835",
+      "publicSourceFiles": 45,
+      "deployed": true,
+      "note": "Publication copy of the installed source. Its exact bytes remain in git history at the initial commit."
+    },
+    {
+      "version": "stage4AP-candidate1",
+      "parentPublicSourceManifestSha256": "e088143b83c78e5e1c6844cd37d82893ebc91584b51e565dfd1974014896f835",
+      "publicSourceManifestSha256": "45af1306bffe3c022dff0af8ee04e53edd62588d57394360d99aaa7424e5a13f",
+      "publicSourceFiles": 45,
+      "createdOn": "2026-10-04",
+      "changedFiles": [
+        "INTEGRATION.md",
+        "bridge.py",
+        "emulator_adapter.py",
+        "plugin/index.js",
+        "plugin/test_plugin.mjs",
+        "report.py",
+        "skill/long-task-runner/SKILL.md",
+        "test_bridge.py",
+        "test_emulator_adapter.py",
+        "test_report.py"
+      ],
+      "changes": [
+        "The controller records the adapter-measured display at start_test and refuses an out-of-display tap before calling the adapter. No input is sent, the guest is not stopped, and no source write or rebuild is required. The refusal still uses one work action; cancellation and deadline expiry still stop the job.",
+        "Observations return uiSummary, and taps return afterUiSummary: bounded visible text and controls with bounds and actual-pixel centers, parsed from the guest view tree with declarations refused and size, depth, node and element limits. The view tree is timed separately from its screenshot.",
+        "The report links the post-tap view tree and counts it when unavailable.",
+        "Tool schema and skill guidance describe actual-pixel coordinates; validation errors name the rejected field and the action's accepted fields."
+      ],
+      "unchangedLimits": "8 source writes, 3 builds, 40 work actions, 5-60 minute job deadline, worker and emulator isolation, model and provider checks.",
+      "fixtureTests": {
+        "python": 212,
+        "node": 46,
+        "pythonVersions": ["3.9.23", "3.10.20", "3.11.15", "3.12.3", "3.13.14"],
+        "nodeVersion": "22.22.0",
+        "host": "Linux cloud container; no Studio, Docker daemon, SDK, emulator or model was used"
+      },
+      "deployed": false,
+      "liveModelTrial": "NOT RUN",
+      "deploymentNote": "This publication copy keeps /CONFIGURE placeholders. A deployment must apply the reviewed diff to the installed source through the private guarded updater with fresh identity, baseline and idle-resource checks. install.py is not an update command."
+    }
+  ]
+}

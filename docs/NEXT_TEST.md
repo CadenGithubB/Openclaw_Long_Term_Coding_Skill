@@ -34,4 +34,8 @@ Verify both delivery paths end to end: the model receives supported native image
 
 Stop the job, inspect its cleanup receipt, and write/read back the final checkpoint with the actual results. Preserve failed attempts. Separate build, app behavior, checkpoint and cleanup outcomes, and describe operator assistance explicitly.
 
-The next controller investigation should distinguish an invalid tap rejected before input delivery from an actual guest failure. The recorded controller currently stops the guest after an out-of-display tap and requires a source write plus rebuild before testing can resume. Any change to that behavior needs focused regression coverage and a new deployment review; these instructions do not change it.
+The deployed stage 4AO final2 controller still stops the guest after an out-of-display tap and requires a source write plus rebuild before testing can resume. The undeployed stage 4AP candidate distinguishes the two cases, with fixture regression coverage (see [HANDOFF.md](HANDOFF.md)). Record which version the trial ran. If the candidate is deployed after its review, also check the following and report each as observed or NOT RUN:
+
+- The launch and observe receipts include `uiSummary` with the counter text and both buttons, and their reported centers fall inside the display.
+- A tap's `afterUiSummary` shows the new count. If it disagrees with the screenshot, another observation resolves the disagreement.
+- If the model sends an out-of-display tap, the receipt reports `inputDelivered: false`. The next in-range tap then works on the same guest, without a write or build.

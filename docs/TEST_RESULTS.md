@@ -39,3 +39,7 @@ The published source differs from the installation only as recorded in [SOURCE_P
 ## Implications for the next change
 
 Prioritize native image transport and visible chat captures, actual-pixel input guidance, and recovery from an input validation rejection without an unnecessary rebuild. Complete checkpoint readbacks and finalization before the earlier deadline. A configurable initial build allowance of 10 is proposed, with compatible write/action budgets and the existing deadline and isolation controls retained; it is not implemented. None of these proposed changes should be recorded as fixes already deployed.
+
+## Follow-up source candidate (fixture results only)
+
+Stage 4AP candidate 1 implements two of these items in source. Out-of-display taps are refused without stopping the guest or requiring a rebuild. The coordinate guidance now says actual pixels, and observations include a text summary of the screen's visible text and controls with tap centers. It passed 212 Python fixture tests on Python 3.9.23 through 3.13.14, and 46 Node fixture tests, in a Linux cloud container. The new tap regression test was also run against the stage 4AO final2 controller, where it fails as expected. No Studio, model, build worker, emulator or chat was used. The candidate is not deployed, and this trial's recorded results above are unchanged. Native image transport, chat captures, checkpoint readback and the build allowance remain open.

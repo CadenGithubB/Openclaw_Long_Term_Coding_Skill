@@ -175,6 +175,20 @@ class ReportTests(unittest.TestCase):
         self.assertIn('emulator-1/run/session.json', rendered)
         self.assertIn('not a crash-free result', self.render({'events': [{'action': 'observe', 'result': {'ok': True}}]}))
 
+    def test_tap_after_tree_is_linked_or_counted_as_unavailable(self):
+        self.file('emulator-1/run/session.json')
+        tapped = {'action': 'tap', 'after': {'path': self.file('emulator-1/run/003-tap-after.png')},
+                  'afterUi': {'path': self.file('emulator-1/run/004-tap-after.xml')},
+                  'afterUiSummary': {'status': 'summarized', 'elements': [{'text': '1'}]}}
+        missing = {'action': 'tap', 'after': {'path': self.file('emulator-1/run/005-tap-after.png')},
+                   'afterUi': {'status': 'unavailable', 'reason': 'idle timeout'}}
+        self.state['events'] = [{'action': 'tap', 'result': {'ok': True, 'observation': tapped}},
+                                {'action': 'tap', 'result': {'ok': True, 'observation': missing}}]
+        rendered = self.render()
+        self.assertIn('emulator-1/run/004-tap-after.xml', rendered)
+        self.assertIn('view tree was unavailable in 1 observation', rendered)
+        self.assertIn('2 emulator action receipts and 2 screenshots', rendered)
+
     def test_overlapping_crash_snapshots_are_not_summed(self):
         first = self.observation(fatal=2)
         second = copy.deepcopy(first)

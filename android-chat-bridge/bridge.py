@@ -60,6 +60,12 @@ SCAFFOLD = {
 class Refused(RuntimeError):
     pass
 
+class InputRejected(Refused):
+    """Refused before any input reached the guest; the running test is unchanged."""
+    def __init__(self, message, details):
+        super().__init__(message)
+        self.details = details
+
 def require(condition, message):
     if not condition:
         raise Refused(message)
@@ -924,13 +930,36 @@ class Job:
         directory = self.path / ('emulator-%d' % self.state['builds'])
         directory.mkdir(mode=0o700)
         self.emulator = EmulatorSession(directory, p, apk['sha256'], package=PACKAGE, activity='.MainActivity', deadline=self.deadline)
-        self.update_state(status='starting-test', emulatorStatus='starting')
+        self.update_state(status='starting-test', emulatorStatus='starting', testDisplay=None)
         result = self.emulator.start()
-        self.update_state(status='testing', emulatorStatus='running')
-        return self.observation_result(result)
+        # Only the adapter's measured size may bound later taps; an absent or
+        # malformed value leaves the adapter's own check as the only gate.
+        display = result.get('display') if isinstance(result, dict) else None
+        if not (isinstance(display, list) and len(display) == 2 and all(type(v) is int and 1 <= v <= 4096 for v in display)):
+            display = None
+        self.update_state(status='testing', emulatorStatus='running', testDisplay=display)
+        return self.observation_result(result, display)
+
+    def check_tap_target(self, params):
+        """Refuse a tap outside the measured display before the adapter is called."""
+        display = self.state.get('testDisplay')
+        if display is None:
+            return
+        width, height = display
+        x, y = params['x'], params['y']
+        if 0 <= x < width and 0 <= y < height:
+            return
+        raise InputRejected(
+            'Tap (%d, %d) was refused before any input reached the Android guest: it is outside the observed %dx%d display. '
+            'Coordinates are actual screen pixels, not a scaled range: use 0 <= x < %d and 0 <= y < %d, such as the center of a '
+            'control from the latest uiSummary. The controller did not stop the guest or change the qualified APK, so no source '
+            'write or rebuild is needed. Observe again if the current screen is uncertain.' % (x, y, width, height, width, height),
+            {'inputDelivered': False, 'guestStoppedByController': False, 'rebuildRequired': False,
+             'display': {'width': width, 'height': height}, 'rejectedTap': {'x': x, 'y': y},
+             'next': 'Retry with the same jobId and coordinates inside the display, or observe first.'})
 
     @staticmethod
-    def observation_result(result):
+    def observation_result(result, display=None):
         images = []
         def collect(value):
             if isinstance(value, dict):
@@ -941,7 +970,14 @@ class Job:
             elif isinstance(value, list):
                 for item in value: collect(item)
         collect(result)
-        return {'summary': 'These are actual Android guest observations and screenshots. Inspect the screens against the requested behavior; successful input or launch alone is not a gameplay pass.', 'observation': result, 'images': images}
+        summary = 'These are actual Android guest observations and screenshots. Inspect the screens against the requested behavior; successful input or launch alone is not a gameplay pass.'
+        response = {'summary': summary, 'observation': result, 'images': images}
+        if display is not None:
+            response['display'] = {'width': display[0], 'height': display[1]}
+            response['summary'] += (' Tap coordinates are actual pixels of this %dx%d display: 0 <= x < %d and 0 <= y < %d.'
+                                    ' uiSummary (afterUiSummary for a tap) lists the visible text and controls with their bounds and centers;'
+                                    ' it was captured after the screenshot, so observe again if the two disagree.' % (display[0], display[1], display[0], display[1]))
+        return response
 
     def retire_cache(self, worker):
         """Retire this job's derived cache only after confirmed worker cleanup."""
@@ -1096,8 +1132,10 @@ class Job:
             elif action == 'start_test': result = self.start_test()
             elif action in ('tap', 'observe'):
                 require(self.emulator is not None and self.state['status'] == 'testing', 'start the qualified APK test first')
+                if action == 'tap':
+                    self.check_tap_target(params)
                 observation = self.emulator.observe() if action == 'observe' else self.emulator.tap(params['x'], params['y'], params.get('count',1), params.get('intervalMs',300))
-                result = self.observation_result(observation)
+                result = self.observation_result(observation, self.state.get('testDisplay'))
             else: raise Refused('unsupported action')
             self.check()
             result.update(ok=True, jobId=self.id)
@@ -1105,6 +1143,10 @@ class Job:
             result = {'ok': False, 'jobId': self.id, 'summary': str(error)}
             if self.cancelled.is_set() or time.monotonic() >= self.deadline:
                 result['cleanup'] = self.stop('failed')
+            elif isinstance(error, InputRejected):
+                # No guest command was issued, so this is not a guest failure:
+                # keep the running test and its qualified APK for a corrected tap.
+                result.update(error.details)
             elif action == 'start_test' and self.state.get('testRequiresRepair') and self.emulator is None:
                 result['repairAllowed'] = self.state['writes'] < 8 and self.state['builds'] < 3 and self.state['actions'] <= 37
                 result['next'] = 'The failed guest is stopped. Write repaired source, build a new APK, then start a new test; the previous test directory is retained.'

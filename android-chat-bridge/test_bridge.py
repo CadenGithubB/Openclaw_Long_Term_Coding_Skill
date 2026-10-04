@@ -1119,6 +1119,109 @@ class AdapterFailureStateTests(SandboxCase):
         self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (1, 2, 4))
 
 
+class TapTargetRejectionTests(SandboxCase):
+    """The recorded trial lost a build to a tap rejected before any guest input."""
+
+    def running_job(self, display=(480, 800)):
+        job = self.job()
+        self.qualify(job)
+        job.state['apk'] = dict(job.build_receipt, build={'exitCode': 0}, signature={'exitCode': 0}, packageCheck={'exitCode': 0})
+        guest = Mock()
+        guest.start.return_value = {'action': 'start_test', 'display': list(display) if display else None,
+                                    'initialObservation': {'screenshot': {'path': str(job.path / 'emulator-1/0001-launch.png')}}}
+        guest.tap.return_value = {'action': 'tap', 'status': 'returned'}
+        guest.stop.return_value = {'status': 'stopped', 'errors': [], 'survivingProcessGroups': []}
+        with patch.dict(sys.modules, {'emulator_adapter': types.SimpleNamespace(EmulatorSession=Mock(return_value=guest))}):
+            started = job.perform('start', {'action': 'start_test'})
+        self.assertTrue(started['ok'])
+        return job, guest, started
+
+    def test_start_test_records_measured_display_for_tap_bounds(self):
+        job, guest, started = self.running_job()
+        self.assertEqual(job.state['testDisplay'], [480, 800])
+        self.assertEqual(started['display'], {'width': 480, 'height': 800})
+        self.assertIn('actual pixels of this 480x800 display', started['summary'])
+
+    def test_out_of_display_tap_is_refused_without_stopping_guest_or_requiring_rebuild(self):
+        job, guest, _ = self.running_job()
+        before = copy.deepcopy(job.build_receipt)
+        result = job.perform('tap-outside', {'action': 'tap', 'x': 4096, 'y': 6000})
+        self.assertFalse(result['ok'])
+        self.assertIs(result['inputDelivered'], False)
+        self.assertIs(result['guestStoppedByController'], False)
+        self.assertIs(result['rebuildRequired'], False)
+        self.assertEqual(result['display'], {'width': 480, 'height': 800})
+        self.assertEqual(result['rejectedTap'], {'x': 4096, 'y': 6000})
+        self.assertIn('0 <= x < 480 and 0 <= y < 800', result['summary'])
+        self.assertIn('no source write or rebuild is needed', result['summary'])
+        guest.tap.assert_not_called()
+        guest.stop.assert_not_called()
+        self.assertIs(job.emulator, guest)
+        self.assertEqual(result['status'], 'testing')
+        self.assertEqual((job.state['status'], job.state['emulatorStatus']), ('testing', 'running'))
+        self.assertNotIn('testRequiresRepair', job.state)
+        self.assertNotIn('cleanup', result)
+        self.assertNotIn('emulatorCleanup', result)
+        self.assertEqual(job.build_receipt, before)
+        self.assertEqual(result['progress']['qualifiedApkSourceRevision'], 1)
+        self.assertFalse(job.cancelled.is_set())
+        self.assertEqual((job.state['builds'], job.state['writes'], job.state['actions']), (1, 0, 2))
+        self.assertEqual(result, job.perform('tap-outside', {'action': 'tap', 'x': 4096, 'y': 6000}))
+        self.assertEqual(job.state['actions'], 2)
+        corrected = job.perform('tap-inside', {'action': 'tap', 'x': 240, 'y': 400})
+        self.assertTrue(corrected['ok'])
+        guest.tap.assert_called_once_with(240, 400, 1, 300)
+        self.assertEqual(corrected['display'], {'width': 480, 'height': 800})
+        self.assertEqual(job.state['status'], 'testing')
+
+    def test_display_edges_are_exclusive_upper_bounds(self):
+        for x, y, accepted in ((479, 799, True), (0, 0, True), (480, 0, False), (0, 800, False), (480, 800, False)):
+            job, guest, _ = self.running_job()
+            result = job.perform('edge-%d-%d' % (x, y), {'action': 'tap', 'x': x, 'y': y})
+            with self.subTest(x=x, y=y):
+                self.assertEqual(result['ok'], accepted)
+                self.assertEqual(guest.tap.call_count, 1 if accepted else 0)
+                guest.stop.assert_not_called()
+
+    def test_cancellation_racing_a_rejected_tap_still_stops_the_job(self):
+        job, guest, _ = self.running_job()
+        original = job.check_tap_target
+        def racing(params):
+            job.cancelled.set()  # Arrives after the action's own job check passed.
+            original(params)
+        job.check_tap_target = racing
+        result = job.perform('tap-after-cancel', {'action': 'tap', 'x': 9, 'y': 9000})
+        self.assertFalse(result['ok'])
+        self.assertIn('cleanup', result)
+        guest.stop.assert_called_once()
+        guest.tap.assert_not_called()
+        self.assertIn(job.state['status'], bridge.TERMINAL)
+
+    def test_unknown_display_leaves_adapter_failure_path_unchanged(self):
+        job, guest, started = self.running_job(display=None)
+        self.assertIsNone(job.state['testDisplay'])
+        self.assertNotIn('display', started)
+        guest.tap.side_effect = bridge.Refused('tap outside observed display')
+        result = job.perform('tap-unknown-display', {'action': 'tap', 'x': 4096, 'y': 6000})
+        self.assertFalse(result['ok'])
+        self.assertNotIn('inputDelivered', result)
+        guest.tap.assert_called_once()
+        guest.stop.assert_called_once()
+        self.assertTrue(job.state['testRequiresRepair'])
+
+    def test_malformed_adapter_display_is_not_trusted(self):
+        for display in ([480], [0, 800], [480, 5000], [True, 800], ['480', '800'], (480, 800)):
+            job = self.job()
+            self.qualify(job)
+            guest = Mock()
+            guest.start.return_value = {'display': display}
+            with patch.dict(sys.modules, {'emulator_adapter': types.SimpleNamespace(EmulatorSession=Mock(return_value=guest))}):
+                started = job.perform('start', {'action': 'start_test'})
+            with self.subTest(display=display):
+                self.assertTrue(started['ok'])
+                self.assertIsNone(job.state['testDisplay'])
+
+
 class CacheRetirementTests(SandboxCase):
     def cached_job(self):
         job = self.job()

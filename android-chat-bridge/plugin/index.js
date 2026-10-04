@@ -27,38 +27,50 @@ export const PARAMETERS = {
         content: { type: 'string', description: 'The complete original Java class source, with package org.openclaw.trial;. Build all views and graphics programmatically using Android SDK APIs. Do not reference custom R.layout/R.id resources, XML layouts or external dependencies.', minLength: 1, maxLength: 131072 },
       },
     } },
-    x: { type: 'integer', minimum: 0, maximum: 8192 }, y: { type: 'integer', minimum: 0, maximum: 8192 },
+    x: { type: 'integer', minimum: 0, maximum: 8192, description: 'tap only: horizontal position in actual pixels of the observed display reported by start_test/observe, not a scaled range. For a 480x800 display use 0 <= x < 480; prefer the center of a control from uiSummary.' },
+    y: { type: 'integer', minimum: 0, maximum: 8192, description: 'tap only: vertical position in actual pixels of the observed display reported by start_test/observe, not a scaled range. For a 480x800 display use 0 <= y < 800; prefer the center of a control from uiSummary.' },
     count: { type: 'integer', minimum: 1, maximum: 30 },
     intervalMs: { type: 'integer', minimum: 80, maximum: 1500 },
   },
 };
 
+const ACTION_FIELDS = {
+  prepare: ['action', 'reason', 'timeLimitMinutes'],
+  write_sources: ['action', 'jobId', 'reason', 'files'],
+  build: ['action', 'jobId', 'reason'],
+  start_test: ['action', 'jobId', 'reason'],
+  tap: ['action', 'jobId', 'reason', 'x', 'y', 'count', 'intervalMs'],
+  observe: ['action', 'jobId', 'reason'],
+  status: ['action', 'jobId', 'reason'],
+  stop: ['action', 'jobId', 'reason'],
+};
+
 function invalid(message) { throw new Error(`Android request refused: ${message}`); }
 
-function plainData(value, permitted, label) {
+// Name a rejected field so the envelope can be corrected; echo only identifiers.
+function fieldName(key) {
+  return typeof key === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) ? `"${key}"` : 'with an unsupported name';
+}
+
+function plainData(value, permitted, label, hint = permitted) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
       || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(`${label} must be an object`);
   for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string' || !permitted.includes(key)) invalid(`unknown ${label} field`);
+    if (typeof key !== 'string' || !permitted.includes(key)) invalid(`unknown ${label} field ${fieldName(key)}; use only ${hint.join(', ')}`);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor || !Object.hasOwn(descriptor, 'value')) invalid(`${label} accessors are forbidden`);
   }
 }
 
 export function validateParams(value) {
-  plainData(value, Object.keys(PARAMETERS.properties), 'request');
+  // Read the descriptor, never a getter, before plainData has refused accessors.
+  const action = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'action')?.value : undefined;
+  const hint = typeof action === 'string' && Object.hasOwn(ACTION_FIELDS, action) ? ACTION_FIELDS[action] : Object.keys(PARAMETERS.properties);
+  plainData(value, Object.keys(PARAMETERS.properties), 'request', hint);
   if (!ACTIONS.includes(value.action)) invalid('unsupported action');
-  const permitted = {
-    prepare: ['action', 'reason', 'timeLimitMinutes'],
-    write_sources: ['action', 'jobId', 'reason', 'files'],
-    build: ['action', 'jobId', 'reason'],
-    start_test: ['action', 'jobId', 'reason'],
-    tap: ['action', 'jobId', 'reason', 'x', 'y', 'count', 'intervalMs'],
-    observe: ['action', 'jobId', 'reason'],
-    status: ['action', 'jobId', 'reason'],
-    stop: ['action', 'jobId', 'reason'],
-  }[value.action];
-  if (Object.keys(value).some(key => !permitted.includes(key))) invalid('field does not apply to this action');
+  const permitted = ACTION_FIELDS[value.action];
+  const extra = Object.keys(value).find(key => !permitted.includes(key));
+  if (extra !== undefined) invalid(`field does not apply to this action: ${fieldName(extra)}; ${value.action} accepts ${permitted.join(', ')}`);
   if (Object.hasOwn(value, 'jobId') && (typeof value.jobId !== 'string' || !JOB_ID.test(value.jobId))) invalid('invalid jobId');
   if (!['prepare', 'status', 'stop'].includes(value.action) && !Object.hasOwn(value, 'jobId')) invalid('jobId is required');
   if (Object.hasOwn(value, 'reason') && (typeof value.reason !== 'string' || value.reason.length > 1000)) invalid('reason is too long or is not text');
@@ -310,7 +322,7 @@ export function createTool(ctx, { client = runClient, readImage = loadPng } = {}
   const model = ctx.activeModel ? { provider: ctx.activeModel.provider, modelId: ctx.activeModel.modelId, modelRef: ctx.activeModel.modelRef } : null;
   return {
     name: 'android_project', label: 'Offline Android project', executionMode: 'sequential',
-    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. On the first prepare, optionally choose timeLimitMinutes (integer 5 to 60; new jobs default to 30). Repeating prepare cannot extend an existing job or the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures; inspect them against the requested behavior and preserve incomplete checks. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
+    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. On the first prepare, optionally choose timeLimitMinutes (integer 5 to 60; new jobs default to 30). Repeating prepare cannot extend an existing job or the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures; inspect them against the requested behavior and preserve incomplete checks. Observations include uiSummary: the visible text and controls with bounds and centers, captured separately after the screenshot. Tap x/y are actual pixels of the reported display, not a scaled range; a tap outside the display is refused without stopping the test. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
     parameters: PARAMETERS,
     async execute(toolCallId, rawParams, signal) {
       if (!actor) invalid('missing or ambiguous trusted main-session identity');
