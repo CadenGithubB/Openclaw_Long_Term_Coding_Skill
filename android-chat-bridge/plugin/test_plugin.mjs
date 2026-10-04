@@ -131,8 +131,8 @@ test('initial time budget is described without injecting a global or existing-jo
   assert.equal(Object.hasOwn(field, 'default'), false);
   assert.equal(tool.parameters.required.includes('timeLimitMinutes'), false);
   assert.match(field.description, /prepare only/);
-  assert.match(field.description, /new-job default of 30 minutes/);
-  assert.match(field.description, /cannot extend an existing job or the separate chat deadline/);
+  assert.match(field.description, /new-job default of 60 minutes/);
+  assert.match(field.description, /cannot extend an existing job; nothing here extends the separate chat deadline/);
   for (const params of [{ action: 'prepare' }, ...[5, 30, 60].map(timeLimitMinutes => ({ action: 'prepare', timeLimitMinutes }))]) {
     await tool.execute('call_initial_budget', params);
     assert.deepEqual(calls.at(-1).params, params);
@@ -289,6 +289,31 @@ test('rejected fields are named with the action\'s accepted fields so the envelo
   await assert.rejects(tool.execute('call_action_accessor', accessor), /accessors are forbidden/);
   assert.equal(read, false);
   assert.equal(calls, 0);
+});
+
+test('extend sends only bounded minutes with a reason and never reaches the controller otherwise', async () => {
+  const calls = [];
+  const tool = createTool(CONTEXT, { client: async payload => { calls.push(payload); return response({ jobId: JOB, grantedMinutes: 10 }); } });
+  const good = { action: 'extend', jobId: JOB, extendMinutes: 10, reason: 'Reset check and final checkpoint remain.' };
+  await tool.execute('call_extend', good);
+  assert.deepEqual(calls[0].params, good);
+  const bad = [
+    { extendMinutes: 4 }, { extendMinutes: 31 }, { extendMinutes: 10.5 }, { extendMinutes: '10' }, { extendMinutes: true },
+  ];
+  for (const patch of bad) await assert.rejects(tool.execute('call_bad_extend', { ...good, ...patch }), /extendMinutes must be an integer from 5 to 30/);
+  for (const reason of ['', '   ']) await assert.rejects(tool.execute('call_no_reason', { ...good, reason }), /extend requires a reason/);
+  const { reason, ...unexplained } = good;
+  await assert.rejects(tool.execute('call_missing_reason', unexplained), /extend requires a reason/);
+  const { jobId, ...unbound } = good;
+  await assert.rejects(tool.execute('call_missing_job', unbound), /jobId is required/);
+  await assert.rejects(tool.execute('call_extend_on_prepare', { action: 'prepare', extendMinutes: 10 }), /field does not apply to this action: "extendMinutes"/);
+  await assert.rejects(tool.execute('call_limit_on_extend', { ...good, timeLimitMinutes: 60 }), /field does not apply to this action: "timeLimitMinutes"; extend accepts/);
+  assert.equal(calls.length, 1);
+  const tool2 = createTool(CONTEXT);
+  assert.match(tool2.parameters.properties.extendMinutes.description, /new successful build/);
+  assert.match(tool2.parameters.properties.extendMinutes.description, /Does not add source writes, builds, actions or chat time/);
+  assert.match(tool2.description, /new jobs default to 60/);
+  assert.match(tool2.description, /never extends the separate chat deadline/);
 });
 
 test('tap coordinates are described as actual display pixels, not a scaled range', () => {

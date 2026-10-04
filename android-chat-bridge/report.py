@@ -10,7 +10,8 @@ from urllib.parse import quote
 
 ACTION_NAMES = {'prepare': 'Prepare the Android environment', 'write_sources': 'Write the app source',
                 'build': 'Build the APK', 'start_test': 'Install and launch the app',
-                'observe': 'Observe the Android screen', 'tap': 'Interact with the app', 'stop': 'Stop the job'}
+                'observe': 'Observe the Android screen', 'tap': 'Interact with the app', 'stop': 'Stop the job',
+                'extend': 'Request more controller time'}
 STATUSES = {'preparing': 'The Android environment is being prepared.',
             'ready': 'The Android environment is ready for source code.',
             'source-ready': 'Source work is retained, and a current successful build is still needed.',

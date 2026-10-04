@@ -39,9 +39,14 @@ ENV = {'HOME': '/CONFIGURE/service-home', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin
        'DOCKER_HOST': 'unix:///CONFIGURE/docker.sock'}
 MAX_REQUEST = 600 * 1024
 MAX_RESPONSE = 5 * 1024 * 1024
-DEFAULT_TIME_LIMIT_MINUTES = 30
+DEFAULT_TIME_LIMIT_MINUTES = 60
 MIN_TIME_LIMIT_MINUTES = 5
 MAX_TIME_LIMIT_MINUTES = 60
+# Extensions add controller time only after verified progress; never attempts.
+MIN_EXTENSION_MINUTES = 5
+MAX_EXTENSION_MINUTES = 30
+MAX_EXTENSIONS = 3
+MAX_TOTAL_MINUTES = 120
 MAX_REPORT_BYTES = 128 * 1024
 JAVA_NAME = re.compile(r'[A-Z][A-Za-z0-9_]{0,63}\.java\Z')
 JOB_NAME = re.compile(r'am-[a-f0-9]{32}\Z')
@@ -214,6 +219,12 @@ def with_progress(state, result, deadline=None):
         progress[key + 'Remaining'] = max(0, limit - used) if used is not None else None
     progress['controllerSecondsRemaining'] = seconds
     progress['controllerTimeLimitMinutes'] = recorded_time_limit(state)
+    # Jobs recorded before extensions existed had none; count only valid grants.
+    extensions = state.get('extensions') if isinstance(state.get('extensions'), list) else []
+    granted = sum(item['seconds'] for item in extensions
+                  if isinstance(item, dict) and type(item.get('seconds')) is int and item['seconds'] > 0)
+    progress['controllerExtensionMinutes'] = granted // 60
+    progress['controllerExtensionsRemaining'] = 0 if ended else max(0, MAX_EXTENSIONS - len(extensions))
     if revision is None:
         source = 'The source revision is unknown; no current qualified APK is established.'
     elif revision == 0:
@@ -227,13 +238,19 @@ def with_progress(state, result, deadline=None):
         return str(value) if value is not None else 'unknown'
     limits = 'Unused limits: %s source writes, %s builds and %s actions.' % (amount('writes'), amount('builds'), amount('actions'))
     duration = progress['controllerTimeLimitMinutes']
-    selected = ('The recorded controller time limit is %d minutes, fixed at preparation.' % duration
-                if duration is not None else 'The recorded controller time limit is unknown.')
+    selected = ('The recorded controller time limit is %d minutes, fixed at preparation' % duration
+                if duration is not None else 'The recorded controller time limit is unknown')
+    if granted:
+        selected += ', plus %d extension minutes granted' % (granted // 60)
+    selected += '.'
     if ended:
         clock = 'This ended job has no controller work time left and cannot continue; that does not confirm cleanup.'
     else:
         clock = ('Controller work time remaining: %s seconds; this is separate from the chat deadline, and a chat timeout does not confirm cleanup.'
                  % (seconds if seconds is not None else 'unknown'))
+        if progress['controllerExtensionsRemaining']:
+            clock += (' The extend action can add 5 to 30 minutes after a new successful build since the last extension'
+                      ' (%d remaining, %d-minute total cap); it never extends the chat.' % (progress['controllerExtensionsRemaining'], MAX_TOTAL_MINUTES))
     result = dict(result)
     result.update(status=state.get('status'), progress=progress)
     result['progressSummary'] = source + ' ' + limits + ' ' + selected + ' ' + clock
@@ -245,7 +262,7 @@ def validate_params(params):
     common = {'action', 'jobId', 'reason'}
     extra = {'prepare': {'timeLimitMinutes'}, 'status': set(), 'stop': set(), 'write_sources': {'files'},
              'build': set(), 'start_test': set(), 'observe': set(),
-             'tap': {'x', 'y', 'count', 'intervalMs'}}
+             'tap': {'x', 'y', 'count', 'intervalMs'}, 'extend': {'extendMinutes'}}
     require(action in extra, 'unknown Android action')
     require(set(params) <= common | extra[action], 'unknown parameters refused')
     if 'jobId' in params:
@@ -254,6 +271,10 @@ def validate_params(params):
     if 'timeLimitMinutes' in params:
         validate_time_limit(params['timeLimitMinutes'])
     require(isinstance(params.get('reason', ''), str) and len(params.get('reason', '')) <= 1000, 'reason must be short text')
+    if action == 'extend':
+        require(type(params.get('extendMinutes')) is int and MIN_EXTENSION_MINUTES <= params['extendMinutes'] <= MAX_EXTENSION_MINUTES,
+                'extendMinutes must be an integer from 5 to 30')
+        require(params.get('reason', '').strip() != '', 'extend requires a reason explaining the remaining work')
     if action == 'write_sources':
         files = params.get('files')
         require(isinstance(files, list) and 1 <= len(files) <= 16, 'provide 1 to 16 Java source files')
@@ -626,7 +647,7 @@ class Job:
         self.state = {'jobId': self.id, 'actor': actor, 'createdAt': time.time(),
                       'timeLimitMinutes': time_limit_minutes, 'deadlineSeconds': seconds,
                       'status': 'preparing', 'builds': 0,
-                      'writes': 0, 'actions': 0, 'sourceRevision': 0, 'events': []}
+                      'writes': 0, 'actions': 0, 'sourceRevision': 0, 'extensions': [], 'events': []}
         self.path.mkdir(mode=0o700, parents=True)
         self.persist()
 
@@ -915,7 +936,7 @@ class Job:
                               'build': build_record, 'signature': signature, 'packageCheck': package_record,
                               'image': IMAGE, 'package': PACKAGE, 'builtAt': time.time()}
         atomic(self.path / ('build-%d.json' % self.state['builds']), self.build_receipt)
-        self.update_state(status='built', apk=self.build_receipt, testRequiresRepair=False)
+        self.update_state(status='built', apk=self.build_receipt, testRequiresRepair=False, lastQualifiedBuild=self.state['builds'])
         return {'summary': 'The APK built offline and passed signature, package and launcher checks. The worker is stopped. Android launch and gameplay remain unverified until the separate emulator test.', 'apk': self.build_receipt, 'buildOutput': build_text[-5000:]}
 
     def start_test(self):
@@ -939,6 +960,34 @@ class Job:
             display = None
         self.update_state(status='testing', emulatorStatus='running', testDisplay=display)
         return self.observation_result(result, display)
+
+    def extend(self, minutes, reason):
+        """Move the deadline later after verified build progress; counters stay unchanged."""
+        extensions = self.state.get('extensions', [])
+        require(len(extensions) < MAX_EXTENSIONS, 'this job has used all %d time extensions' % MAX_EXTENSIONS)
+        qualified = self.state.get('lastQualifiedBuild')
+        previous = extensions[-1]['afterQualifiedBuild'] if extensions else 0
+        require(type(qualified) is int and qualified > previous,
+                'an extension requires a new successful build since %s; finish or stop with the remaining time'
+                % ('the previous extension' if extensions else 'preparation'))
+        used = self.state['deadlineSeconds'] + sum(item['seconds'] for item in extensions)
+        available = MAX_TOTAL_MINUTES * 60 - used
+        require(available >= 60, 'this job has reached its %d-minute total time cap' % MAX_TOTAL_MINUTES)
+        seconds = min(minutes * 60, available)
+        deadline = self.deadline + seconds
+        if self.emulator is not None:
+            # The running guest enforces its own absolute deadline; move it first.
+            self.emulator.extend_deadline(deadline)
+        self.deadline = deadline
+        record = {'at': time.time(), 'requestedMinutes': minutes, 'seconds': seconds,
+                  'afterQualifiedBuild': qualified, 'reason': reason}
+        self.update_state(extensions=extensions + [record])
+        granted = seconds // 60
+        return {'summary': ('The controller deadline moved %d minutes later after verified build progress%s. Source writes, builds and actions are unchanged. '
+                            'This does not extend the chat’s own timeout; if the chat ends first, the controller still stops the job at its deadline.'
+                            % (granted, '' if granted == minutes else ' (limited by the %d-minute total cap)' % MAX_TOTAL_MINUTES)),
+                'grantedMinutes': granted, 'requestedMinutes': minutes,
+                'totalMinutes': (used + seconds) // 60, 'maxTotalMinutes': MAX_TOTAL_MINUTES}
 
     def check_tap_target(self, params):
         """Refuse a tap outside the measured display before the adapter is called."""
@@ -1130,6 +1179,7 @@ class Job:
             elif action == 'write_sources': result = self.write_sources(params['files'])
             elif action == 'build': result = self.build()
             elif action == 'start_test': result = self.start_test()
+            elif action == 'extend': result = self.extend(params['extendMinutes'], params['reason'])
             elif action in ('tap', 'observe'):
                 require(self.emulator is not None and self.state['status'] == 'testing', 'start the qualified APK test first')
                 if action == 'tap':

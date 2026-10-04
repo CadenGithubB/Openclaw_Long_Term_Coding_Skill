@@ -520,6 +520,17 @@ showDeviceFrame=no
                 self.stop()
                 raise
 
+    def extend_deadline(self, deadline):
+        """Accept a controller-granted later deadline; it can never move earlier or revive a stop."""
+        with self._state_lock:
+            require(not self._stopping, 'emulator stopped')
+            require(type(deadline) in (int, float) and time.monotonic() < self.deadline < deadline < float('inf'),
+                    'emulator deadline may only move later before it expires')
+            self.deadline = deadline
+            self._receipt.setdefault('deadlineExtensions', []).append({'deadline': deadline, **self._stamp()})
+            self._flush()
+            return deadline
+
     def stop(self):
         """Stop only Popen handles created by this instance; idempotent and watchdog-safe."""
         with self._stop_lock:

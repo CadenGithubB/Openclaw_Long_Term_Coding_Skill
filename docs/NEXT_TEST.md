@@ -4,7 +4,7 @@ This is a proposed next-run procedure informed by the recorded counter failures.
 
 ## Prepare the run
 
-Check the current deployed version and idle owned resources. Use one fresh local-model chat, request High thinking before generation if supported, and explicitly set its time budget. For a 30-minute attempt, use `chat.send.timeoutMs = 1800000` and select `timeLimitMinutes: 30` on the first Android `prepare`. Leave time before the earlier deadline for stop and checkpoint readback.
+Check the current deployed version and idle owned resources. Use one fresh local-model chat, request High thinking before generation if supported, and explicitly set its time budget. On the deployed stage 4AO final2 controller, use `chat.send.timeoutMs = 3600000` and select `timeLimitMinutes: 60` on the first Android `prepare`; its default is still 30. If the stage 4AP candidate is deployed, 60 is the default. Use `chat.send.timeoutMs = 7200000` so its progress-gated `extend` can actually be used. Record each extension request, whether it was granted, and its stated reason. Leave time before the earlier deadline for stop and checkpoint readback.
 
 Use a new exact checkpoint title for the test, read it before writing, then verify each saved checkpoint with a readback. Do not reuse an ended job or reset its counters. Keep the full acceptance contract even if implementation is split into smaller milestones.
 

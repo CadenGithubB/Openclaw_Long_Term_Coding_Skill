@@ -1,5 +1,5 @@
 {
-  "currentRepositorySource": "stage4AP-candidate1",
+  "currentRepositorySource": "stage4AP-candidate2",
   "deployedSource": "stage4AO-final2",
   "versions": [
     {
@@ -44,7 +44,43 @@
       },
       "deployed": false,
       "liveModelTrial": "NOT RUN",
-      "deploymentNote": "This publication copy keeps /CONFIGURE placeholders. A deployment must apply the reviewed diff to the installed source through the private guarded updater with fresh identity, baseline and idle-resource checks. install.py is not an update command."
+      "deploymentNote": "This publication copy keeps /CONFIGURE placeholders. A deployment must apply the reviewed diff to the installed source through the private guarded updater with fresh identity, baseline and idle-resource checks. install.py is not an update command.",
+      "superseded": "Superseded by stage4AP-candidate2 before any deployment; its exact bytes remain in git history at commit d8059ac."
+    },
+    {
+      "version": "stage4AP-candidate2",
+      "parentPublicSourceManifestSha256": "45af1306bffe3c022dff0af8ee04e53edd62588d57394360d99aaa7424e5a13f",
+      "publicSourceManifestSha256": "8c558a70c6fc8311eed0898e7485b107d1ad78091c81265d55c533ed900f07c8",
+      "publicSourceFiles": 45,
+      "createdOn": "2026-10-04",
+      "changedFilesFromParent": [
+        "INTEGRATION.md",
+        "bridge.py",
+        "emulator_adapter.py",
+        "plugin/index.js",
+        "plugin/test_plugin.mjs",
+        "report.py",
+        "skill/long-task-runner/SKILL.md",
+        "test_bridge.py",
+        "test_emulator_adapter.py"
+      ],
+      "changes": [
+        "New jobs default to 60 minutes instead of 30; the initial selection range stays 5 to 60 minutes and repeated prepare still cannot change it.",
+        "A new extend action adds 5 to 30 controller minutes with a required reason, only after a new successful build since the previous grant. A job allows at most 3 grants and 120 minutes in total including the initial selection; a request beyond that total is reduced to the remainder. The running guest's deadline moves first. Extensions add no writes, builds or actions, cannot revive an expired, cancelled or ended job, and are recorded in state and the report.",
+        "Progress receipts report granted extension minutes and remaining extensions, and state that the chat timeout is separate."
+      ],
+      "requestedBy": "Operator request after observing runs that timed out while producing partial results.",
+      "unchangedLimits": "8 source writes, 3 builds, 40 work actions, worker and emulator isolation, per-call 180-second build and boot caps, model and provider checks.",
+      "fixtureTests": {
+        "python": 227,
+        "node": 47,
+        "pythonVersions": ["3.9.23", "3.10.20", "3.11.15", "3.12.3", "3.13.14"],
+        "nodeVersion": "22.22.0",
+        "host": "Linux cloud container; no Studio, Docker daemon, SDK, emulator or model was used"
+      },
+      "deployed": false,
+      "liveModelTrial": "NOT RUN",
+      "deploymentNote": "Same as candidate 1. Extensions help only if the operator also dispatches the chat with a long enough chat.send.timeoutMs (3600000 for 60 minutes, 7200000 to allow extensions); the controller cannot extend the chat."
     }
   ]
 }

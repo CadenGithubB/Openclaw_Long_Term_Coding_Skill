@@ -2261,7 +2261,7 @@ class InitialTimeLimitTests(SandboxCase):
         return controller.jobs[result['jobId']], result
 
     def test_new_jobs_apply_default_or_explicit_bounded_duration_once(self):
-        for supplied, expected in ((None, 30), (5, 5), (30, 30), (60, 60)):
+        for supplied, expected in ((None, 60), (5, 5), (30, 30), (60, 60)):
             with self.subTest(supplied=supplied):
                 controller = bridge.Controller()
                 actor = 'agent:main:duration-%s|session' % supplied
@@ -2452,6 +2452,192 @@ class InitialTimeLimitTests(SandboxCase):
         self.assertEqual(job.deadline, 1300)
         self.assertEqual(job.state['actions'], 1)
         job.build.assert_not_called()
+
+
+class TimeExtensionTests(SandboxCase):
+    """Extensions add time after verified progress, never attempts or chat time."""
+
+    def built_job(self, builds=1):
+        job = self.job()
+        self.qualify(job)
+        job.state.update(builds=builds, lastQualifiedBuild=builds, actions=builds)
+        return job
+
+    def extend(self, job, minutes=20, rid=None, reason='Two interaction checks and the final checkpoint remain.'):
+        self.calls = getattr(self, 'calls', 0) + 1
+        rid = rid or 'extend-call-%d' % self.calls
+        return job.perform(rid, {'action': 'extend', 'extendMinutes': minutes, 'reason': reason})
+
+    def test_new_jobs_record_no_extensions_and_advertise_the_gate(self):
+        job = self.job()
+        self.assertEqual(job.state['timeLimitMinutes'], 60)
+        self.assertEqual(job.state['extensions'], [])
+        status = job.perform('status', {'action': 'status'})
+        self.assertEqual(status['progress']['controllerExtensionMinutes'], 0)
+        self.assertEqual(status['progress']['controllerExtensionsRemaining'], 3)
+        self.assertIn('The extend action can add 5 to 30 minutes after a new successful build', status['progressSummary'])
+        self.assertIn('never extends the chat', status['progressSummary'])
+
+    def test_extension_requires_a_successful_build_first(self):
+        job = self.job()
+        self.sources(job)
+        job.state.update(builds=1, writes=1)  # A failed build is an attempt, not progress.
+        deadline = job.deadline
+        result = self.extend(job)
+        self.assertFalse(result['ok'])
+        self.assertIn('requires a new successful build since preparation', result['summary'])
+        self.assertEqual(job.deadline, deadline)
+        self.assertEqual(job.state['extensions'], [])
+        self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (1, 1, 1))
+        self.assertFalse(job.cancelled.is_set())
+        self.assertEqual(job.state['status'], 'source-ready')
+        job.stop_worker.assert_not_called()
+
+    def test_granted_extension_moves_deadline_without_changing_counters(self):
+        job = self.built_job()
+        deadline = job.deadline
+        result = self.extend(job, 20)
+        self.assertTrue(result['ok'])
+        self.assertEqual(job.deadline, deadline + 1200)
+        self.assertEqual((result['grantedMinutes'], result['requestedMinutes'], result['totalMinutes']), (20, 20, 80))
+        self.assertIn('does not extend the chat', result['summary'])
+        self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (0, 1, 2))
+        self.assertEqual(result['progress']['buildsRemaining'], 2)
+        self.assertEqual(result['progress']['controllerExtensionMinutes'], 20)
+        self.assertEqual(result['progress']['controllerExtensionsRemaining'], 2)
+        self.assertEqual(result['progress']['controllerTimeLimitMinutes'], 60)
+        self.assertIn('60 minutes, fixed at preparation, plus 20 extension minutes granted', result['progressSummary'])
+        record = json.loads((job.path / 'state.json').read_text())['extensions'][0]
+        self.assertEqual((record['seconds'], record['afterQualifiedBuild']), (1200, 1))
+        self.assertEqual(record['reason'], 'Two interaction checks and the final checkpoint remain.')
+        self.assertEqual(job.state['deadlineSeconds'], 3600, 'the initial selection stays historical evidence')
+        replay = self.extend(job, 20, rid='extend-call-1')
+        self.assertEqual(replay, result)
+        self.assertEqual(job.deadline, deadline + 1200)
+
+    def test_each_further_extension_needs_another_successful_build(self):
+        job = self.built_job()
+        self.assertTrue(self.extend(job, 10)['ok'])
+        again = self.extend(job, 10)
+        self.assertFalse(again['ok'])
+        self.assertIn('since the previous extension', again['summary'])
+        self.assertEqual(len(job.state['extensions']), 1)
+        job.state.update(builds=2, lastQualifiedBuild=2)
+        self.assertTrue(self.extend(job, 10)['ok'])
+        self.assertEqual(len(job.state['extensions']), 2)
+
+    def test_total_cap_limits_grant_and_count_cap_refuses(self):
+        job = self.built_job()
+        deadline = job.deadline
+        self.assertEqual(self.extend(job, 30)['grantedMinutes'], 30)
+        job.state.update(builds=2, lastQualifiedBuild=2)
+        self.assertEqual(self.extend(job, 25)['grantedMinutes'], 25)
+        job.state.update(builds=3, lastQualifiedBuild=3)
+        capped = self.extend(job, 30)
+        self.assertTrue(capped['ok'])
+        self.assertEqual((capped['grantedMinutes'], capped['totalMinutes']), (5, 120))
+        self.assertIn('limited by the 120-minute total cap', capped['summary'])
+        self.assertEqual(job.deadline, deadline + 3600)
+        job.state.update(lastQualifiedBuild=4)
+        refused = self.extend(job, 5)
+        self.assertFalse(refused['ok'])
+        self.assertIn('used all 3 time extensions', refused['summary'])
+        self.assertEqual(job.deadline, deadline + 3600)
+        self.assertEqual(refused['progress']['controllerExtensionsRemaining'], 0)
+
+    def test_total_cap_refuses_once_reached(self):
+        job = self.built_job()
+        job.state['extensions'] = [{'seconds': 3600, 'afterQualifiedBuild': 0}]
+        deadline = job.deadline
+        result = self.extend(job, 5)
+        self.assertFalse(result['ok'])
+        self.assertIn('120-minute total time cap', result['summary'])
+        self.assertEqual(job.deadline, deadline)
+
+    def test_running_guest_deadline_moves_with_the_job(self):
+        job = self.built_job()
+        job.state['status'] = 'testing'
+        guest = Mock()
+        job.emulator = guest
+        deadline = job.deadline
+        self.assertTrue(self.extend(job, 15)['ok'])
+        guest.extend_deadline.assert_called_once_with(deadline + 900)
+        guest.stop.assert_not_called()
+        self.assertEqual(job.state['status'], 'testing')
+
+    def test_guest_that_cannot_extend_leaves_job_deadline_unchanged(self):
+        job = self.built_job()
+        job.state['status'] = 'testing'
+        guest = Mock()
+        guest.extend_deadline.side_effect = RuntimeError('emulator stopped')
+        job.emulator = guest
+        deadline = job.deadline
+        result = self.extend(job, 15)
+        self.assertFalse(result['ok'])
+        self.assertEqual(job.deadline, deadline)
+        self.assertEqual(job.state['extensions'], [])
+
+    def test_expired_or_cancelled_jobs_cannot_be_revived(self):
+        for mode in ('expired', 'cancelled'):
+            job = self.built_job()
+            if mode == 'expired':
+                job.deadline = time.monotonic() - 1
+            else:
+                job.cancelled.set()
+            result = self.extend(job, 30)
+            with self.subTest(mode=mode):
+                self.assertFalse(result['ok'])
+                self.assertIn('cleanup', result)
+                self.assertIn(job.state['status'], bridge.TERMINAL)
+                self.assertEqual(job.state['extensions'], [])
+                self.assertEqual(result['progress']['controllerExtensionsRemaining'], 0)
+
+    def test_extension_parameters_are_validated_before_any_job_work(self):
+        good = {'action': 'extend', 'jobId': 'am-' + 'a' * 32, 'extendMinutes': 10, 'reason': 'Tests remain.'}
+        self.assertEqual(bridge.validate_params(dict(good)), good)
+        for patch_values in ({'extendMinutes': 4}, {'extendMinutes': 31}, {'extendMinutes': True}, {'extendMinutes': 10.0},
+                             {'extendMinutes': '10'}, {'reason': ''}, {'reason': '   '}, {'timeLimitMinutes': 60}):
+            with self.subTest(patch_values=patch_values), self.assertRaises(bridge.Refused):
+                bridge.validate_params({**good, **patch_values})
+        for missing in ('extendMinutes', 'reason'):
+            with self.subTest(missing=missing), self.assertRaises(bridge.Refused):
+                bridge.validate_params({k: v for k, v in good.items() if k != missing})
+        with self.assertRaisesRegex(bridge.Refused, 'unknown parameters'):
+            bridge.validate_params({'action': 'prepare', 'extendMinutes': 10})
+
+    def test_real_build_success_records_progress_event(self):
+        job = self.job()
+        self.sources(job)
+        job.state.update(writes=1, lastWrittenSourceRevision=1)
+        apk = job.work / 'project/app/build/outputs/apk/debug/app-debug.apk'
+        apk.parent.mkdir(parents=True)
+        with zipfile.ZipFile(apk, 'w') as archive:
+            archive.writestr('AndroidManifest.xml', b'manifest fixture')
+            archive.writestr('classes.dex', b'dex fixture')
+        job.command.side_effect = [('build success', {'exitCode': 0}), ('signature success', {'exitCode': 0}),
+                                   ("package: name='org.openclaw.trial'\nlaunchable-activity: name='org.openclaw.trial.MainActivity'", {'exitCode': 0})]
+        self.assertTrue(job.perform('build', {'action': 'build'})['ok'])
+        self.assertEqual(job.state['lastQualifiedBuild'], 1)
+        self.assertTrue(self.extend(job, 5)['ok'])
+
+    def test_controller_routes_extend_only_to_the_owning_session(self):
+        controller = bridge.Controller()
+        job = self.built_job()
+        controller.jobs[job.id] = job
+        request = {'requestId': 'route', 'params': {'action': 'extend', 'jobId': job.id, 'extendMinutes': 5, 'reason': 'Finish checks.'}}
+        with self.assertRaisesRegex(bridge.Refused, 'not owned'):
+            controller.dispatch({'actor': OTHER, **request})
+        self.assertEqual(job.state['extensions'], [])
+        self.assertTrue(controller.dispatch({'actor': ACTOR, **request})['ok'])
+
+    def test_historical_jobs_without_extension_records_report_none(self):
+        job = self.job()
+        job.state.update(status='stopped')
+        del job.state['extensions']
+        result = bridge.retained_receipt((job.path, job.state), 'status')
+        self.assertEqual(result['progress']['controllerExtensionMinutes'], 0)
+        self.assertEqual(result['progress']['controllerExtensionsRemaining'], 0)
+        self.assertNotIn('extend action can add', result['progressSummary'])
 
 
 if __name__ == "__main__":

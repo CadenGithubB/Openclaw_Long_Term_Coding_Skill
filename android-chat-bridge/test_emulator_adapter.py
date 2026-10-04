@@ -375,6 +375,37 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(action['status'], 'interrupted')
         self.assertEqual(action['taps'][0]['status'], 'dispatched')
 
+    def test_granted_deadline_extension_keeps_guest_running_past_old_deadline(self):
+        session = self.session()
+        session.start()
+        old = session.deadline
+        self.assertEqual(session.extend_deadline(old + 900), old + 900)
+        self.clock.value = old + 1
+        self.assertEqual(session.observe('extended')['action'], 'observe')
+        journal = json.loads((session.run_dir / 'session.json').read_text())
+        self.assertEqual(journal['deadlineExtensions'][0]['deadline'], old + 900)
+        self.clock.value = old + 901
+        with self.assertRaisesRegex(adapter.EmulatorError, 'deadline'):
+            session.observe('expired')
+        self.assertEqual(session.stop()['status'], 'stopped')
+
+    def test_deadline_cannot_move_earlier_revive_or_extend_after_expiry(self):
+        session = self.session()
+        session.start()
+        old = session.deadline
+        for value in (old, old - 1, True, float('inf'), float('nan'), '700'):
+            with self.subTest(value=value), self.assertRaises(adapter.EmulatorError):
+                session.extend_deadline(value)
+        self.assertEqual(session.deadline, old)
+        self.clock.value = old
+        with self.assertRaisesRegex(adapter.EmulatorError, 'before it expires'):
+            session.extend_deadline(old + 60)
+        self.clock.value = 100.0
+        session.stop()
+        with self.assertRaisesRegex(adapter.EmulatorError, 'emulator stopped'):
+            session.extend_deadline(old + 60)
+        self.assertEqual(session.deadline, old)
+
     def test_stop_is_idempotent_and_never_uses_disk_pid_as_authority(self):
         session = self.session()
         session.start()

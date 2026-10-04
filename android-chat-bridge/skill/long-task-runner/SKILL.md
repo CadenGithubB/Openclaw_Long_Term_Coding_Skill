@@ -43,8 +43,8 @@ below do not apply to this route. Do not probe host paths or spawn another write
    application or its remaining checks.
 2. **Prepare, then checkpoint.** `prepare` checks the actual environment and
    returns `jobId`. For a new job, its optional `timeLimitMinutes` is an integer
-   from 5 to 60, defaulting to 30; the budget is set once. Choose 30–60 minutes
-   for a full complex task on the local model, considering the user's deadline.
+   from 5 to 60, defaulting to 60; the initial budget is set once. Choose less
+   only when the user's or chat's deadline is shorter.
    Before lengthy source generation, use `note_write` to save a compact initial
    checkpoint with the goal, checks, job/report identity, selected time budget and
    next action; inspect the result, then use `note_read` to verify it. Mark
@@ -76,18 +76,23 @@ below do not apply to this route. Do not probe host paths or spawn another write
    and remaining controller time when provided. The chat/runtime deadline may
    already be fixed and shorter; choosing a job budget does not extend the current
    chat. Keep the original job and selected time limit, with at most eight writes,
-   three builds and forty actions. Do not reset budgets, create automatic continuation loops
-   or change global configuration to gain time. Before lengthy generation,
+   three builds and forty actions. If verified work remains after a new
+   successful build, `extend` may add 5–30 controller minutes. Give a `reason`
+   naming the remaining checks. It allows at most three grants and 120 minutes in
+   total, and adds no chat time, writes, builds or actions. A refused extension
+   means finishing or stopping within the remaining time. Do not reset budgets,
+   create automatic continuation loops or change global configuration to gain
+   time. Before lengthy generation,
    reserve time within the earliest job, chat or user deadline for `stop`,
    confirmed cleanup, and final checkpoint save/read-back.
    Finish with verified progress, remaining checks and cleanup state.
 
 Use the returned `jobId` for `write_sources`, `build`, `start_test`, `tap`,
-`observe`, `status` and `stop`, following the discovered schemas. With `tool_call`,
+`observe`, `extend`, `status` and `stop`, following the discovered schemas. With `tool_call`,
 keep `id` outside `args` and Android parameters inside it:
 
 ```json
-{"id":"android_project","args":{"action":"prepare","timeLimitMinutes":30,"reason":"Check the prepared offline tools and create a clean project before writing the app."}}
+{"id":"android_project","args":{"action":"prepare","timeLimitMinutes":60,"reason":"Check the prepared offline tools and create a clean project before writing the app."}}
 ```
 
 Keep `args` as a JSON object, never a serialized string, and include `action` in

@@ -10,16 +10,17 @@ const PNG_LIMIT = 4 * 1024 * 1024;
 const REPORT_LIMIT = 128 * 1024;
 const CLIENT_ERROR_LIMIT = 1000;
 const JOB_ID = /^am-[a-f0-9]{32}$/;
-const ACTIONS = ['prepare', 'write_sources', 'build', 'start_test', 'tap', 'observe', 'status', 'stop'];
+const ACTIONS = ['prepare', 'write_sources', 'build', 'start_test', 'tap', 'observe', 'extend', 'status', 'stop'];
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 export const PARAMETERS = {
   type: 'object', additionalProperties: false, required: ['action'],
   properties: {
     action: { type: 'string', enum: ACTIONS },
-    jobId: { type: 'string', pattern: '^am-[a-f0-9]{32}$', description: 'Reuse the exact jobId returned by prepare. Required on every write_sources, build, start_test, tap and observe call.' },
+    jobId: { type: 'string', pattern: '^am-[a-f0-9]{32}$', description: 'Reuse the exact jobId returned by prepare. Required on every write_sources, build, start_test, tap, observe and extend call.' },
     reason: { type: 'string', maxLength: 1000 },
-    timeLimitMinutes: { type: 'integer', minimum: 5, maximum: 60, description: 'prepare only: choose the controller time budget on the first preparation of a new job. Omit for the new-job default of 30 minutes. Repeating prepare cannot extend an existing job or the separate chat deadline.' },
+    timeLimitMinutes: { type: 'integer', minimum: 5, maximum: 60, description: 'prepare only: choose the controller time budget on the first preparation of a new job. Omit for the new-job default of 60 minutes. Repeating prepare cannot extend an existing job; nothing here extends the separate chat deadline.' },
+    extendMinutes: { type: 'integer', minimum: 5, maximum: 30, description: 'extend only: request 5 to 30 more controller minutes. Granted only after a new successful build since the previous extension, at most 3 times and 120 minutes in total. Requires a reason naming the remaining work. Does not add source writes, builds, actions or chat time.' },
     files: { type: 'array', description: 'Java class source files only. Construct the UI programmatically in Java; XML layouts, custom resources, dependency files and build scripts are not accepted.', minItems: 1, maxItems: 16, items: {
       type: 'object', additionalProperties: false, required: ['name', 'content'],
       properties: {
@@ -41,6 +42,7 @@ const ACTION_FIELDS = {
   start_test: ['action', 'jobId', 'reason'],
   tap: ['action', 'jobId', 'reason', 'x', 'y', 'count', 'intervalMs'],
   observe: ['action', 'jobId', 'reason'],
+  extend: ['action', 'jobId', 'reason', 'extendMinutes'],
   status: ['action', 'jobId', 'reason'],
   stop: ['action', 'jobId', 'reason'],
 };
@@ -76,6 +78,10 @@ export function validateParams(value) {
   if (Object.hasOwn(value, 'reason') && (typeof value.reason !== 'string' || value.reason.length > 1000)) invalid('reason is too long or is not text');
   if (Object.hasOwn(value, 'timeLimitMinutes') && (!Number.isInteger(value.timeLimitMinutes)
       || value.timeLimitMinutes < 5 || value.timeLimitMinutes > 60)) invalid('timeLimitMinutes must be an integer from 5 to 60, chosen only on the first prepare');
+  if (value.action === 'extend') {
+    if (!Number.isInteger(value.extendMinutes) || value.extendMinutes < 5 || value.extendMinutes > 30) invalid('extendMinutes must be an integer from 5 to 30');
+    if (typeof value.reason !== 'string' || !value.reason.trim()) invalid('extend requires a reason naming the remaining work');
+  }
   if (value.action === 'write_sources') {
     if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > 16) invalid('provide 1 to 16 Java files');
     let total = 0;
@@ -322,7 +328,7 @@ export function createTool(ctx, { client = runClient, readImage = loadPng } = {}
   const model = ctx.activeModel ? { provider: ctx.activeModel.provider, modelId: ctx.activeModel.modelId, modelRef: ctx.activeModel.modelRef } : null;
   return {
     name: 'android_project', label: 'Offline Android project', executionMode: 'sequential',
-    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. On the first prepare, optionally choose timeLimitMinutes (integer 5 to 60; new jobs default to 30). Repeating prepare cannot extend an existing job or the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures; inspect them against the requested behavior and preserve incomplete checks. Observations include uiSummary: the visible text and controls with bounds and centers, captured separately after the screenshot. Tap x/y are actual pixels of the reported display, not a scaled range; a tap outside the display is refused without stopping the test. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
+    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. On the first prepare, optionally choose timeLimitMinutes (integer 5 to 60; new jobs default to 60). Repeating prepare cannot extend an existing job. If more time is needed after a new successful build, extend adds 5 to 30 minutes (at most 3 times, 120 minutes in total); it never extends the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures; inspect them against the requested behavior and preserve incomplete checks. Observations include uiSummary: the visible text and controls with bounds and centers, captured separately after the screenshot. Tap x/y are actual pixels of the reported display, not a scaled range; a tap outside the display is refused without stopping the test. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
     parameters: PARAMETERS,
     async execute(toolCallId, rawParams, signal) {
       if (!actor) invalid('missing or ambiguous trusted main-session identity');
