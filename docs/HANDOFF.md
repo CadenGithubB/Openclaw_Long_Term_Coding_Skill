@@ -2,7 +2,7 @@
 
 ## Start from the deployed source
 
-The deployed implementation is **stage 4AQ**, installed on the existing Mac Studio on the afternoon of October 4, 2026. It is the stage 4AO final2 source plus the stage 4AP candidates 1–2 and the 4AQ changes described below. `android-chat-bridge/` holds its publication copy. Public files replace service-account paths with `/CONFIGURE/...` placeholders and remove original volume identity values; [SOURCE_VERSIONS.json](SOURCE_VERSIONS.json) records both the publication and the installed manifest fingerprints. The source manifest binds 45 files; the README records its fingerprint. The controller, plugin, emulator adapter and skill belong together. An older standalone skill copy does not include the complete Android route.
+The deployed implementation is **stage 4AS**, installed on the existing Mac Studio on the evening of October 4, 2026. It is the stage 4AO final2 source plus the stage 4AP candidates 1–2 and the 4AQ, 4AR and 4AS changes described below. `android-chat-bridge/` holds its publication copy. Public files replace service-account paths with `/CONFIGURE/...` placeholders and remove original volume identity values; [SOURCE_VERSIONS.json](SOURCE_VERSIONS.json) records both the publication and the installed manifest fingerprints. The source manifest binds 45 files; the README records its fingerprint. The controller, plugin, emulator adapter and skill belong together. An older standalone skill copy does not include the complete Android route.
 
 The live installation is operated through Apple Remote Desktop using the configured service account. Its UNIX command task is also scriptable from the operator Mac with AppleScript (`send unix command task` with a `user` property; `execute` returns the command output), which avoids driving the window interface. The local repository is a source and documentation checkout, not the live host. The original detailed evidence remains in the operator's private project archive. Do not infer a new live success from a saved transcript or fixture test.
 
@@ -42,6 +42,23 @@ A transcript analysis of the October 4 morning run ([TEST_RESULTS.md](TEST_RESUL
 
 The guarded updater verified the installed files were exactly stage 4AO final2, ran the staged and installed fixture suites, and replaced nine files with backups. A Gateway refresh loaded the plugin; configuration and retained jobs were unchanged.
 
+## Stage 4AR (deployed October 4, 2026)
+
+- `start_test` waits up to 10 seconds for the app's splash window (`Splash Screen <package>` in `dumpsys window windows`) to close before the launch frame, and records `launchSettle`. In the bird trial it worked every time: about one second of waiting, and the launch frames show the game.
+- The job report no longer headlines an earlier compiler failure once a later build succeeded.
+- The skill asks the model to cite captures only for what they show and to copy counts and causes from receipts.
+
+## Stage 4AS (deployed October 4, 2026)
+
+Requested after the bird trial: more time, no dead end after a job ends, and screenshots visible to the human.
+
+- **Time.** Jobs default to 120 minutes (5–240). `extend` is granted after any new successful work since the previous grant, up to 8 grants and 240 minutes in total. Receipts warn under 15 minutes only when an extension is currently grantable.
+- **Continuation.** After a job ends with confirmed cleanup, `prepare` starts a continuation job. The session's jobs share 20 writes, 10 builds, 120 actions and 240 minutes, so limits are never reset. Only the plugin's cleanup after an interrupted call (`:abort`) cancels a session. A late work call on an ended job is answered from the record instead of failing, because the plugin would otherwise turn the failure into a cancellation.
+- **Screenshots for the human.** Each capture is saved once into OpenClaw's inbound media store through `runtime.channel.media.saveMediaBuffer`. Its image block gains a `media://inbound/...` url and a caption, which the Control UI loads through its authenticated media route. Plugin tools cannot use `details.media` for this: OpenClaw keeps only http(s) media URLs from non-core tools, and `chat.history` drops image data. The model still receives the image data.
+- **Games.** The skill tells the model to exercise real-time games inside one tap burst rather than a single tap followed by a later observation.
+
+Two pre-deployment reviews ran with adversarial verification. They found one major defect in the first draft, the late-call cancellation described above, which was fixed with tests. The first installation attempt was refused by the updater's own staged tests. Live confirmation of the screenshot display is pending.
+
 ## Read the actual outcome before choosing more work
 
 [TEST_RESULTS.md](TEST_RESULTS.md#stage-4aq-trial-october-4-afternoon) records the first 4AQ trial. The counter app passed all three behavior checks in about 14 minutes, with the model's own stop, confirmed cleanup and checkpoint readback. That establishes one successful small task. It does not establish the bird game, long tasks, repeatability, or that captures are shown to the human. The model also overstated its evidence: it called the initial state "visually confirmed" from a launch frame that was the Android splash screen.
@@ -50,12 +67,13 @@ The original bird-game request remains a separate requirement: observed play, sc
 
 ## Priorities for subsequent work
 
-1. **Make the launch frame trustworthy.** Both trials captured the splash screen at launch while the UI tree, taken about two seconds later, showed the app. Have the adapter take a settled launch frame once the tree shows the app package (or retake after the dump), so frame and tree describe the same moment. In a direct probe the local model correctly identified the splash frame when asked, so this is a grounding problem, not a vision limit.
-2. **Checkpoint discipline.** The 4AQ run skipped the exact-title read and readback of its initial checkpoint, read the previous trial's note instead, and wrote three false details into the final checkpoint (error count, crash cause, timestamps). Consider controller- or plugin-side help, such as a checkpoint template filled from receipts.
-3. **Show captures to the human.** The model now receives native image blocks, but whether the normal web chat displays them was not checked (the trial session was created with `deliver: false`). Verify in the Control UI before building a caption feature.
-4. **Bird-game trial.** The 4AQ budgets and native images make the original request feasible to retry; it will also exercise `observe`, tap bursts, `extend` and the out-of-display refusal, none of which the counter run used.
-5. **Controller report and disk.** The job `report.md` still headlines the first compiler failure after a later successful build. With 10 builds, a job can keep up to 10 emulator disks; host free space is checked only at prepare.
-6. **Portable setup.** The publication copy retains configuration placeholders, UID, model/image identity and baseline checks. Do not remove them to make another host pass; document an equivalent reviewed setup instead.
+1. **Turn latency as context grows.** In the bird trial, turns slowed from about 30 seconds to 4–7 minutes at 76,000–89,000 tokens. That looks like the prompt being reprocessed instead of reused from Ollama's cache. Find what changes the prompt prefix between turns (for example history image pruning) and fix it without changing global routing.
+2. **Confirm the screenshot display live**, including after a page reload. Check the stored image blocks for the `media://inbound` url.
+3. **Gameplay testing method.** Check that the model now uses tap bursts and judges motion, scoring and collisions from the burst frames.
+4. **Checkpoint discipline.** Read and read back the initial checkpoint, and copy facts from receipts. Both trials skipped part of this.
+5. **Bird-game acceptance.** Observed play, scoring, collision, game over and restart on the qualified APK, with confirmed cleanup.
+6. **Housekeeping.** With longer sessions, a job can keep several emulator disks, and screenshot copies accumulate in OpenClaw's inbound media store. Host free space is checked only at prepare.
+7. **Portable setup.** Keep the configuration placeholders and baseline checks; document an equivalent reviewed setup rather than removing them.
 
 Choose work from the actual latest failures, and preserve unsuccessful runs and any operator assistance.
 

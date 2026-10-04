@@ -1,6 +1,6 @@
 {
-  "currentRepositorySource": "stage4AQ",
-  "deployedSource": "stage4AQ",
+  "currentRepositorySource": "stage4AS",
+  "deployedSource": "stage4AS",
   "versions": [
     {
       "version": "stage4AO-final2",
@@ -121,6 +121,79 @@
       ],
       "deployedOn": "2026-10-04",
       "installedSourceManifestSha256": "254b323592d5e1df224b8d2791ce2af6b5d62f817285d6bbdad27e8b11b54a6e"
+    },
+    {
+      "version": "stage4AR",
+      "parentPublicSourceManifestSha256": "8c65087d0443d5f629481c298744dc4a424b91ed64e93c2673f9cedd96a75026",
+      "publicSourceManifestSha256": "21181a8e78922b2b4b87b067387f4566e9e495954134fbe19396d31a90817d61",
+      "installedSourceManifestSha256": "e7a2e1b9c02c2d11a16994d9840ab3513b23c3c60c79a3435efc4bf714c6d2a7",
+      "publicSourceFiles": 45,
+      "createdOn": "2026-10-04",
+      "changedFilesFromParent": [
+        "bridge.py",
+        "emulator_adapter.py",
+        "report.py",
+        "skill/long-task-runner/SKILL.md",
+        "test_bridge.py",
+        "test_emulator_adapter.py",
+        "test_report.py"
+      ],
+      "changes": [
+        "start_test waits up to 10 seconds for the app's splash starting window ('Splash Screen <package>' in dumpsys window windows) to close before the launch frame, and records launchSettle. Failed or non-window output is recorded as unavailable and never fails the launch.",
+        "The start_test summary says the launch frame followed the closed splash window, or tells the model to observe before judging the initial screen when the splash may still be present.",
+        "The job report no longer headlines an earlier compiler failure as blocking when a later build succeeded.",
+        "The skill asks the model to cite each capture only for what it shows and to copy counts, identities and causes from receipts."
+      ],
+      "requestedBy": "Audit of the stage4AQ counter trial, where the launch frame was the splash screen and the model's checkpoint contained estimated details.",
+      "unchangedLimits": "Stage4AQ budgets, time limits, extension gate, isolation and model checks.",
+      "fixtureTests": {
+        "python": 237,
+        "node": 47,
+        "pythonVersions": ["3.9.6", "3.14"],
+        "nodeVersion": "24.21.0",
+        "host": "Operator Mac, then staged and installed suites on the Studio under Python 3.9.6"
+      },
+      "deployed": true,
+      "deployedOn": "2026-10-04",
+      "liveModelTrial": "Bird-game trial on 2026-10-04: the launch frame followed the closed splash every time; the game was not completed. The model tested gameplay with single taps observed 30+ seconds later, misread a fallen bird as a failed tap, requested an extension after the 60-minute deadline, and was refused three later preparations. See TEST_RESULTS.md.",
+      "deploymentNote": "Installed with the guarded updater from exact stage4AQ files; seven files replaced with backups. No plugin change, so no Gateway refresh was needed."
+    },
+    {
+      "version": "stage4AS",
+      "parentPublicSourceManifestSha256": "21181a8e78922b2b4b87b067387f4566e9e495954134fbe19396d31a90817d61",
+      "publicSourceManifestSha256": "4eec9ce2d46b092ac93ed8273afee4a12f7d3052c9c752e1348457a10550fb03",
+      "installedSourceManifestSha256": "b3d5f85e902176b293174991c10c13d41bbd349d0dc29f3fb542ea96d6190a5e",
+      "publicSourceFiles": 45,
+      "createdOn": "2026-10-04",
+      "changedFilesFromParent": [
+        "INTEGRATION.md",
+        "bridge.py",
+        "plugin/index.js",
+        "plugin/test_plugin.mjs",
+        "skill/long-task-runner/SKILL.md",
+        "test_bridge.py"
+      ],
+      "changes": [
+        "Jobs default to 120 controller minutes (5-240 selectable); extensions of 5-30 minutes are granted after any new successful work action (source write, build, launch, tap or observation), up to 8 grants and 240 minutes in total. Receipts warn when less than 15 minutes remain and an extension is currently grantable.",
+        "A chat session may start a continuation job after its job ends with confirmed cleanup. The session's jobs share 20 writes, 10 builds, 120 actions and 240 minutes (elapsed time, capped at each job's allotment), so ending a job never resets limits. Uncertain cleanup, exhausted limits or a cancelled session refuse continuation.",
+        "Only the plugin's cleanup after an interrupted call (request IDs ending ':abort') cancels a session; the model's own stop does not. An interruption stops every active job of the session. Work aimed at an ended job after the controller idles out is answered from the record instead of failing, so it no longer turns into a cancellation.",
+        "Replayed preparation requests never create another job; the continuation decision reads job status under the job's lock; build-failure summaries stay under the plugin's 16000-character receipt bound; refusals name the job's actual state.",
+        "Each screenshot is also saved once into OpenClaw's inbound media store and its image block gains a media://inbound url and caption, so the Control UI can show it; the model still receives the image data. Copies are deduplicated, re-saved if pruned, and capped per job.",
+        "The skill tells the model to exercise real-time games inside one tap burst, to request extensions early, how continuation works, and that prepare takes no jobId."
+      ],
+      "requestedBy": "Operator review of the bird trial: longer and more flexible time, a stuck session after expiry, and screenshots missing from the dashboard.",
+      "unchangedLimits": "Per-call build and boot caps, worker and emulator isolation, single active job, model and provider checks.",
+      "fixtureTests": {
+        "python": 250,
+        "node": 54,
+        "pythonVersions": ["3.9.6", "3.14"],
+        "nodeVersion": "24.21.0 locally; 26.5.0 on the Studio",
+        "host": "Operator Mac, then staged and installed suites on the Studio"
+      },
+      "deployed": true,
+      "deployedOn": "2026-10-04",
+      "liveModelTrial": "Bird-game trial in progress.",
+      "deploymentNote": "The first installation attempt was refused by the updater's staged plugin tests (a test helper relied on an import only present in the publication copy); nothing was replaced. The corrected package installed five files with backups, followed by a Gateway refresh."
     }
   ]
 }

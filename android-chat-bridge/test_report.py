@@ -105,6 +105,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(self.state, before)
         self.assertEqual(self.state['events'][0]['result']['summary'], summary)
 
+    def test_compiler_failure_repaired_by_a_later_build_is_not_the_headline_blocker(self):
+        self.build_failure('/workspace/project/app/src/main/java/org/openclaw/trial/MainActivity.java:26: error: cannot find symbol\n')
+        self.state['events'] += [{'action': 'write_sources', 'result': {'ok': True}},
+                                 {'action': 'build', 'result': {'ok': True}}]
+        rendered = self.render()
+        self.assertIn('Earlier recorded failure: The Java compiler rejected an earlier source revision. A later build succeeded', rendered)
+        self.assertNotIn('Most recent recorded failure', rendered)
+        self.assertNotIn('a new build is required', rendered)
+        self.assertIn('- MainActivity.java:26: cannot find symbol', rendered)
+
     def test_repeated_javac_headers_are_deduplicated_in_original_order(self):
         first = '/workspace/MainActivity.java:5: error: cannot find symbol'
         second = '/workspace/BirdView.java:7: error: incompatible types'

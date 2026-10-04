@@ -43,3 +43,12 @@ Record which version the trial ran. Stage 4AQ checks, with their status after th
 - **NOT RUN:** an out-of-display tap reports `inputDelivered: false` and the next in-range tap works on the same guest without a write or build.
 - **NOT RUN:** `extend` is requested with a reason after a new successful build, and granted or refused as documented.
 - **NOT RUN:** the normal web chat shows the captured images to the human after a reload.
+
+Stage 4AS checks, to report as observed or NOT RUN after its first trial:
+
+- Expanding an `android_project` tool output in the Control UI shows the screenshot itself, before and after a page reload. In `chat.history`, the image block carries a `media://inbound/androidshot-...` url and no data.
+- The model still describes the screens correctly from the images.
+- For the game, the model plays inside one `tap` burst and judges motion, pipes, score and collisions from the burst frames.
+- The model requests `extend` before the deadline and after new work, and the grant is recorded with its reason.
+- If a job ends with work remaining, `prepare` starts a continuation job whose limits are the session remainder. If the session's limits are used, the refusal says so and the model reports instead of retrying.
+

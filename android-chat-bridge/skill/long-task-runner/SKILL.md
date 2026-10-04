@@ -43,8 +43,8 @@ below do not apply to this route. Do not probe host paths or spawn another write
    application or its remaining checks.
 2. **Prepare, then checkpoint.** `prepare` checks the actual environment and
    returns `jobId`. For a new job, its optional `timeLimitMinutes` is an integer
-   from 5 to 60, defaulting to 60; the initial budget is set once. Choose less
-   only when the user's or chat's deadline is shorter.
+   from 5 to 240, defaulting to 120; the initial budget is set once. Choose less
+   only when the user's or chat's deadline is shorter. `prepare` takes no `jobId`.
    Before lengthy source generation, use `note_write` to save a compact initial
    checkpoint with the goal, checks, job/report identity, selected time budget and
    next action; inspect the result, then use `note_read` to verify it. Mark
@@ -68,22 +68,33 @@ below do not apply to this route. Do not probe host paths or spawn another write
    input alone proves no behavior. Keep unobserved checks incomplete.
    `uiSummary` (a tap's `afterUiSummary`) lists visible text and controls with
    bounds and centers; it is captured after its screenshot, so a launch frame may
-   still show a splash. Observe again when they disagree. Tap a control's `center`
+   still show a splash. Observe again when they disagree. Cite each capture only
+   for what it shows: a splash or loading frame proves nothing about the app, so
+   name the evidence actually used (for example the tree or a later frame). Tap a control's `center`
    in actual pixels of the reported display (`0 <= x < width`, `0 <= y < height`);
    never scale into the schema's 0–8192 bound. An outside tap is refused without
    input or guest stop: correct it with the same `jobId`, without a rebuild.
+   Games keep running while you think, and your turns take tens of seconds: a
+   single tap followed by a later `observe` shows only the aftermath (a bird that
+   already fell is not proof the tap failed). Exercise gameplay inside one `tap`
+   by setting `count` (up to 30) and `intervalMs` (80–1500, at most 15 seconds in
+   total); a burst of 4 or more also returns frames captured during the burst.
+   Judge motion, scoring and collisions from those frames, not from one later
+   screen.
 6. **Leave time to finish safely.** Read receipt counters, source qualification
    and remaining controller time when provided. The chat/runtime deadline may
    already be fixed and shorter; choosing a job budget does not extend the current
    chat. Keep the original job and selected time limit, with at most 20 writes,
-   10 builds and 120 actions. If verified work remains after a new
-   successful build, `extend` may add 5–30 controller minutes. Give a `reason`
-   naming the remaining checks. It allows at most three grants and 120 minutes in
-   total including the initial limit; it adds no chat time, writes or builds, and
-   each request uses one action. A refused extension
-   means finishing or stopping within the remaining time. Do not reset budgets,
-   create automatic continuation loops or change global configuration to gain
-   time. Before lengthy generation,
+   10 builds and 120 actions for the whole chat session. If work remains after new
+   successful work since the last grant (a source write, build, launch, tap or
+   observation), `extend` may add 5–30 controller minutes. Give a `reason` naming
+   the remaining checks. It allows at most eight grants and 240 minutes in total
+   including the initial limit; it adds no chat time, writes or builds, and each
+   request uses one action. Your turns can take several minutes, so request time
+   when about 20 minutes remain, not at the deadline; receipts warn below 15
+   minutes. A refused extension means finishing or stopping within the remaining
+   time. Do not create automatic continuation loops or change global
+   configuration to gain time. Before lengthy generation,
    reserve time within the earliest job, chat or user deadline for `stop`,
    confirmed cleanup, and final checkpoint save/read-back.
    Finish with verified progress, remaining checks and cleanup state.
@@ -94,7 +105,7 @@ your tool list: call it by name with its parameters, not through `tool_call`, so
 its screenshots arrive as images you can inspect:
 
 ```json
-{"action":"prepare","timeLimitMinutes":60,"reason":"Check the prepared offline tools and create a clean project before writing the app."}
+{"action":"prepare","timeLimitMinutes":120,"reason":"Check the prepared offline tools and create a clean project before writing the app."}
 ```
 
 Include `action` in every call. This source-write example is structural; replace
@@ -103,6 +114,10 @@ both placeholders with the returned job ID and complete original Java source:
 ```json
 {"action":"write_sources","jobId":"<returned jobId>","files":[{"name":"MainActivity.java","content":"<complete original Java source>"}],"reason":"Write the app using the prepared Android project."}
 ```
+
+Returned screenshots are also shown to the operator in the chat, with a caption,
+whenever the display copy succeeds; never resend screenshot paths with other
+tools or `MEDIA:` lines.
 
 Only if `android_project` is absent from your direct tools, call it through
 `tool_call` with `id` outside `args` and these parameters inside it as a JSON
@@ -124,15 +139,21 @@ retained report is evidence, not a replacement checkpoint or permission to retry
 Supply a short plain-language `reason` for each material action. Inspect the
 controller's reasons, receipts and artifact identities before reporting results.
 Use completed-tense evidence only when receipts establish it; an unchecked box
-does not make a completion claim accurate. Completion requires every requested
+does not make a completion claim accurate. Copy counts, identities and causes
+into checkpoints from receipts; write "unknown" rather than estimating one. Completion requires every requested
 acceptance check to pass at its required evidence level.
 
 Use `status` after uncertainty and `stop` when finished or cancelled; confirm its
 receipt. Uncertain cleanup and exhausted limits remain incomplete. On
 `cleanup-uncertain` or unconfirmed cleanup, end the attempt for operator
-reconciliation. After cancellation or an acknowledged stop, do not repeat
-`prepare` in that session; use only registered `status`/`stop` for inspection or
-cleanup and report the known cause and unknowns. A tool failure does not establish
+reconciliation. After a run is cancelled, do not repeat `prepare` in that
+session; use only registered `status`/`stop` for inspection and report the known
+cause and unknowns. After your own `stop` or a job's expiry with confirmed
+cleanup, `prepare` (without `jobId`) may start a continuation job when requested
+work remains. It receives only what the session has left of its writes, builds,
+actions and 240 minutes, and starts from a fresh scaffold, so resend complete
+source. A refused continuation means the session's limits are used: report the
+outcome instead of retrying. A tool failure does not establish
 that host tools, Docker or the emulator are missing or down. Do not invent restart
 commands. Failure authorizes no shell, agent CLI or `curl` fallback, nested model
 run, automatic restart, arbitrary build scripts or unrestricted ADB.

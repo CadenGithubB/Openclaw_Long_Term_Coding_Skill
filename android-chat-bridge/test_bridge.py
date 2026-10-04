@@ -268,29 +268,34 @@ class ControllerTests(SandboxCase):
         self.assertEqual(len(controller.jobs), 1)
         job.prepare.assert_not_called()
 
-    def test_terminal_duplicate_prepare_reports_failure_without_resetting_limits(self):
+    def test_terminal_prepare_cannot_continue_once_session_limits_or_cleanup_block_it(self):
         for status in ("stopped", "failed", "expired", "cleanup-uncertain"):
             controller = bridge.Controller()
             job = self.job()
             job.state.update(status=status, builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES, actions=bridge.MAX_ACTIONS)
+            if status != "cleanup-uncertain":
+                job.state["cleanup"] = {"cleanupComplete": True, "finishedAt": job.state["createdAt"] + 60}
+            job.persist()
             job.prepare = Mock(side_effect=AssertionError("terminal job preparation replay"))
             controller.jobs[job.id] = job
             before = copy.deepcopy(job.state)
-            result = controller.dispatch(self.request(action="prepare", rid="new-after-terminal"))
+            with patch.object(bridge, "Job", side_effect=AssertionError("limits were reset by a new job")):
+                result = controller.dispatch(self.request(action="prepare", rid="new-after-terminal"))
             with self.subTest(status=status):
                 self.assertFalse(result["ok"])
                 self.assertIs(result["retryAllowed"], False)
                 self.assertEqual(result["jobId"], job.id)
                 self.assertEqual(result["status"], status)
-                self.assertIn("cannot be restarted in this session", result["summary"])
+                expected = "operator review" if status == "cleanup-uncertain" else "cannot start another job"
+                self.assertIn(expected, result["summary"])
                 self.assertEqual(job.state, before)
                 self.assertEqual(len(controller.jobs), 1)
                 job.prepare.assert_not_called()
                 job.command.assert_not_called()
 
-    def test_actor_only_stop_cancels_delayed_prepare(self):
+    def test_interrupted_call_cancels_delayed_prepare(self):
         controller = bridge.Controller()
-        result = controller.dispatch(self.request(action="stop"))
+        result = controller.dispatch(self.request(action="stop", rid="call_1:abort"))
         self.assertTrue(result["ok"])
         with self.assertRaises(bridge.Refused):
             controller.dispatch(self.request(action="prepare", rid="delayed-prepare"))
@@ -298,14 +303,31 @@ class ControllerTests(SandboxCase):
 
     def test_actor_cancellation_survives_controller_restart(self):
         controller = bridge.Controller()
-        controller.dispatch(self.request(action="stop"))
+        controller.dispatch(self.request(action="stop", rid="call_1:abort"))
         replacement = bridge.Controller()
         with self.assertRaises(bridge.Refused):
             replacement.dispatch(self.request(action="prepare", rid="late-after-restart"))
         self.assertEqual(replacement.jobs, {})
 
+    def test_interruption_naming_an_old_job_also_stops_the_active_one(self):
+        controller = bridge.Controller()
+        ended, active = self.job(), self.job()
+        ended.state.update(status='stopped', cleanup={'cleanupComplete': True})
+        active.state['status'] = 'testing'
+        active.stop = Mock(return_value={'cleanupComplete': True})
+        controller.jobs = {ended.id: ended, active.id: active}
+        controller.dispatch(self.request(action="stop", rid="call_9:abort", jobId=ended.id))
+        active.stop.assert_called_once_with('stopped')
+        self.assertTrue(bridge.cancellation_path(ACTOR).exists())
+
+    def test_model_stop_does_not_cancel_the_session(self):
+        controller = bridge.Controller()
+        self.assertTrue(controller.dispatch(self.request(action="stop", rid="call_model_stop"))["ok"])
+        self.assertFalse(bridge.cancellation_path(ACTOR).exists())
+        self.assertNotIn(ACTOR, controller.cancelled_actors)
+
     def test_client_stop_before_socket_exists_cancels_later_preparation(self):
-        request = self.request(action="stop", rid="abort-before-controller-start")
+        request = self.request(action="stop", rid="call_before_start:abort")
         stdin = types.SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))
         stdout = io.StringIO()
         with patch.object(bridge, "SOCKET", bridge.ROOT / "absent.sock"), patch.object(bridge.sys, "stdin", stdin), patch.object(bridge.sys, "stdout", stdout):
@@ -486,7 +508,7 @@ class LifecycleTests(SandboxCase):
         self.assertFalse(running["value"])
         self.assertEqual(job.state["status"], "stopped")
         self.assertTrue(job.state["cleanup"]["stopped"])
-        self.assertIn("job cancelled", errors)
+        self.assertIn("job is stopping; cleanup is in progress and no further work is accepted", errors)
 
     def test_png_observations_are_exposed_for_launch_and_tap_results(self):
         first = {"path": "/retained/emulator-1/launch.png", "sha256": "a" * 64, "bytes": 123, "width": 1080, "height": 1920}
@@ -496,6 +518,17 @@ class LifecycleTests(SandboxCase):
         self.assertEqual(result["images"], [first, second])
         self.assertEqual(result["observation"], observation)
         self.assertNotIn("passed", result)
+
+    def test_launch_summary_states_whether_the_splash_window_may_cover_the_frame(self):
+        frame = {"path": "/retained/emulator-1/launch.png", "sha256": "a" * 64, "bytes": 123}
+        closed = bridge.Job.observation_result({"action": "start_test", "launchSettle": {"status": "splash-closed"}, "initialObservation": {"screenshot": frame}}, (480, 800))
+        self.assertIn("taken after the app’s splash window closed", closed["summary"])
+        self.assertIn("actual pixels of this 480x800 display", closed["summary"])
+        for status in ("splash-still-present", "unavailable"):
+            lingering = bridge.Job.observation_result({"action": "start_test", "launchSettle": {"status": status}, "initialObservation": {"screenshot": frame}}, (480, 800))
+            self.assertIn("call observe before judging the initial screen", lingering["summary"])
+        plain = bridge.Job.observation_result({"action": "observe", "screenshot": frame}, (480, 800))
+        self.assertNotIn("splash", plain["summary"])
 
     def test_observe_returns_actual_adapter_png_receipt(self):
         job = self.job()
@@ -1579,13 +1612,14 @@ class ReportAccessTests(SandboxCase):
     def test_terminal_prepare_refusal_still_links_its_report(self):
         controller = bridge.Controller()
         job = self.job()
-        job.state["status"] = "failed"
+        job.state["status"] = "failed"  # No confirmed cleanup: continuation needs operator review.
+        job.persist()
         controller.jobs[job.id] = job
         result = controller.dispatch({"actor": ACTOR, "requestId": "new-prepare", "params": {"action": "prepare"}})
         self.assertFalse(result["ok"])
+        self.assertIn("operator review", result["summary"])
         self.assertEqual(result["reportPath"], str(job.path / "report.md"))
         self.assertNotIn("reportText", result)
-
 
 class RetainedServiceTests(SandboxCase):
     def request(self, actor=ACTOR, action='status', **params):
@@ -2261,7 +2295,7 @@ class InitialTimeLimitTests(SandboxCase):
         return controller.jobs[result['jobId']], result
 
     def test_new_jobs_apply_default_or_explicit_bounded_duration_once(self):
-        for supplied, expected in ((None, 60), (5, 5), (30, 30), (60, 60)):
+        for supplied, expected in ((None, 120), (5, 5), (60, 60), (240, 240)):
             with self.subTest(supplied=supplied):
                 controller = bridge.Controller()
                 actor = 'agent:main:duration-%s|session' % supplied
@@ -2281,7 +2315,7 @@ class InitialTimeLimitTests(SandboxCase):
                 self.assertEqual((result['progress']['writesRemaining'], result['progress']['buildsRemaining'], result['progress']['actionsRemaining']), (bridge.MAX_WRITES, bridge.MAX_BUILDS, bridge.MAX_ACTIONS - 1))
 
     def test_invalid_limits_fail_before_job_creation_or_external_operations(self):
-        for value in (True, False, 4, 61, 0, -1, 30.0, 5.5, '30', None, [], {}, float('inf'), float('nan')):
+        for value in (True, False, 4, 241, 0, -1, 30.0, 5.5, '30', None, [], {}, float('inf'), float('nan')):
             controller = bridge.Controller()
             with self.subTest(value=value), patch.object(bridge, 'Job', side_effect=AssertionError('invalid request created job')):
                 with self.assertRaisesRegex(bridge.Refused, 'timeLimitMinutes must be an integer'):
@@ -2290,7 +2324,7 @@ class InitialTimeLimitTests(SandboxCase):
         self.assertFalse((bridge.ROOT / 'jobs').exists())
 
     def test_constructor_revalidates_duration_before_creating_evidence(self):
-        for value in (True, 4, 61, 30.0, '30', None):
+        for value in (True, 4, 241, 30.0, '30', None):
             with self.subTest(value=value), self.assertRaisesRegex(bridge.Refused, 'timeLimitMinutes must be an integer'):
                 bridge.Job(ACTOR, time_limit_minutes=value)
         self.assertFalse((bridge.ROOT / 'jobs').exists())
@@ -2380,7 +2414,7 @@ class InitialTimeLimitTests(SandboxCase):
 
     def test_cancelled_session_cannot_choose_a_new_duration_after_restart(self):
         original = bridge.Controller()
-        original.dispatch({'actor': ACTOR, 'requestId': 'cancel', 'params': {'action': 'stop'}})
+        original.dispatch({'actor': ACTOR, 'requestId': 'cancel:abort', 'params': {'action': 'stop'}})
         cancellation = bridge.cancellation_path(ACTOR).read_bytes()
         for controller in (original, bridge.Controller()):
             for minutes in (5, 60):
@@ -2410,20 +2444,20 @@ class InitialTimeLimitTests(SandboxCase):
 
     def test_retained_twenty_minute_job_is_not_relabelled_or_adopted(self):
         job = self.job()
-        job.state.update(deadlineSeconds=1200)
+        job.state.update(deadlineSeconds=1200, builds=2, writes=3, actions=7)
         del job.state['timeLimitMinutes']
         job.stop('failed')
         files = {p.name: p.read_bytes() for p in job.path.iterdir() if p.is_file()}
         controller = bridge.Controller()
         with patch.object(bridge, 'Job', side_effect=AssertionError('retained job adopted')):
-            result = controller.dispatch(self.request(timeLimitMinutes=60))
             state = controller.dispatch({'actor': ACTOR, 'requestId': 'historical-status', 'params': {'action': 'status', 'jobId': job.id}})
-        self.assertFalse(result['ok'])
-        for receipt in (result, state):
-            self.assertEqual(receipt['progress']['controllerTimeLimitMinutes'], 20)
-            self.assertEqual(receipt['progress']['controllerSecondsRemaining'], 0)
-            self.assertIn('20 minutes, fixed at preparation', receipt['progressSummary'])
-        self.assertEqual(controller.jobs, {})
+        self.assertEqual(state['progress']['controllerTimeLimitMinutes'], 20)
+        self.assertEqual(state['progress']['controllerSecondsRemaining'], 0)
+        self.assertIn('20 minutes, fixed at preparation', state['progressSummary'])
+        # A new prepare starts a separate continuation job; the retained record is never relabelled.
+        continuation, result = self.prepare(controller, self.request(timeLimitMinutes=60))
+        self.assertNotEqual(continuation.id, job.id)
+        self.assertEqual(continuation.state['continuesJob'], job.id)
         self.assertEqual({p.name: p.read_bytes() for p in job.path.iterdir() if p.is_file()}, files)
 
     def test_missing_historical_duration_stays_unknown_instead_of_using_default(self):
@@ -2455,13 +2489,19 @@ class InitialTimeLimitTests(SandboxCase):
 
 
 class TimeExtensionTests(SandboxCase):
-    """Extensions add time after verified progress, never attempts or chat time."""
+    """Extensions add time after new successful work, never attempts or chat time."""
 
-    def built_job(self, builds=1):
-        job = self.job()
+    def built_job(self, builds=1, minutes=None):
+        job = self.job() if minutes is None else bridge.Job(ACTOR, time_limit_minutes=minutes)
+        if minutes is not None:
+            job.stop_worker = Mock(return_value={"running": False})
+            job.retire_cache = Mock(return_value={"status": "not-created", "complete": True})
         self.qualify(job)
-        job.state.update(builds=builds, lastQualifiedBuild=builds, actions=builds)
+        job.state.update(builds=builds, lastQualifiedBuild=builds, actions=builds, progressMarks=builds)
         return job
+
+    def progress(self, job):
+        job.state['progressMarks'] += 1
 
     def extend(self, job, minutes=20, rid=None, reason='Two interaction checks and the final checkpoint remain.'):
         self.calls = getattr(self, 'calls', 0) + 1
@@ -2470,22 +2510,49 @@ class TimeExtensionTests(SandboxCase):
 
     def test_new_jobs_record_no_extensions_and_advertise_the_gate(self):
         job = self.job()
-        self.assertEqual(job.state['timeLimitMinutes'], 60)
+        self.assertEqual(job.state['timeLimitMinutes'], 120)
         self.assertEqual(job.state['extensions'], [])
         status = job.perform('status', {'action': 'status'})
         self.assertEqual(status['progress']['controllerExtensionMinutes'], 0)
-        self.assertEqual(status['progress']['controllerExtensionsRemaining'], 3)
-        self.assertIn('The extend action can add 5 to 30 minutes after a new successful build', status['progressSummary'])
+        self.assertEqual(status['progress']['controllerExtensionsRemaining'], bridge.MAX_EXTENSIONS)
+        self.assertIn('The extend action can add 5 to 30 minutes after new successful work', status['progressSummary'])
+        self.assertIn('so at most 120 more minutes', status['progressSummary'])
         self.assertIn('never extends the chat', status['progressSummary'])
+        self.assertNotIn('call extend now', status['progressSummary'])
 
-    def test_extension_requires_a_successful_build_first(self):
+    def test_receipts_urge_an_early_extension_near_the_deadline(self):
+        job = self.built_job()
+        job.deadline = bridge.time.monotonic() + 10 * 60
+        status = job.perform('status-near-deadline', {'action': 'status'})
+        self.assertIn('Less than 15 minutes remain', status['progressSummary'])
+        self.assertIn('call extend now', status['progressSummary'])
+        self.assertTrue(self.extend(job, 10)['ok'])
+        job.deadline = bridge.time.monotonic() + 10 * 60
+        status = job.perform('status-after-grant', {'action': 'status'})
+        self.assertNotIn('call extend now', status['progressSummary'], 'no new work since the grant')
+        self.assertIn('needs new successful work since the last grant', status['progressSummary'])
+
+    def test_only_successful_work_actions_count_as_progress(self):
+        job = self.job()
+        job.write_sources = Mock(return_value={'summary': 'written'})
+        job.build = Mock(side_effect=bridge.Refused('offline-build failed: compiler errors'))
+        files = [{'name': 'MainActivity.java', 'content': 'class MainActivity {}'}]
+        self.assertTrue(job.perform('write', {'action': 'write_sources', 'files': files})['ok'])
+        self.assertEqual(job.state['progressMarks'], 1)
+        self.assertFalse(job.perform('failed-build', {'action': 'build'})['ok'])
+        self.assertEqual(job.state['progressMarks'], 1, 'a failed build is an attempt, not progress')
+        job.perform('status-check', {'action': 'status'})
+        self.assertEqual(job.state['progressMarks'], 1)
+
+    def test_extension_requires_new_successful_work_first(self):
         job = self.job()
         self.sources(job)
         job.state.update(builds=1, writes=1)  # A failed build is an attempt, not progress.
         deadline = job.deadline
         result = self.extend(job)
         self.assertFalse(result['ok'])
-        self.assertIn('requires a new successful build since preparation', result['summary'])
+        self.assertIn('requires new successful work', result['summary'])
+        self.assertIn('since preparation', result['summary'])
         self.assertEqual(job.deadline, deadline)
         self.assertEqual(job.state['extensions'], [])
         self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (1, 1, 1))
@@ -2499,59 +2566,73 @@ class TimeExtensionTests(SandboxCase):
         result = self.extend(job, 20)
         self.assertTrue(result['ok'])
         self.assertEqual(job.deadline, deadline + 1200)
-        self.assertEqual((result['grantedMinutes'], result['requestedMinutes'], result['totalMinutes']), (20, 20, 80))
+        self.assertEqual((result['grantedMinutes'], result['requestedMinutes'], result['totalMinutes']), (20, 20, 140))
         self.assertIn('does not extend the chat', result['summary'])
         self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (0, 1, 2))
         self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 1)
         self.assertEqual(result['progress']['controllerExtensionMinutes'], 20)
-        self.assertEqual(result['progress']['controllerExtensionsRemaining'], 2)
-        self.assertEqual(result['progress']['controllerTimeLimitMinutes'], 60)
-        self.assertIn('60 minutes, fixed at preparation, plus 20 extension minutes granted', result['progressSummary'])
+        self.assertEqual(result['progress']['controllerExtensionsRemaining'], bridge.MAX_EXTENSIONS - 1)
+        self.assertEqual(result['progress']['controllerTimeLimitMinutes'], 120)
+        self.assertIn('120 minutes, fixed at preparation, plus 20 extension minutes granted', result['progressSummary'])
         record = json.loads((job.path / 'state.json').read_text())['extensions'][0]
-        self.assertEqual((record['seconds'], record['afterQualifiedBuild']), (1200, 1))
+        self.assertEqual((record['seconds'], record['afterProgress']), (1200, 1))
         self.assertEqual(record['reason'], 'Two interaction checks and the final checkpoint remain.')
-        self.assertEqual(job.state['deadlineSeconds'], 3600, 'the initial selection stays historical evidence')
+        self.assertEqual(job.state['deadlineSeconds'], 7200, 'the initial selection stays historical evidence')
         replay = self.extend(job, 20, rid='extend-call-1')
         self.assertEqual(replay, result)
         self.assertEqual(job.deadline, deadline + 1200)
 
-    def test_each_further_extension_needs_another_successful_build(self):
+    def test_each_further_extension_needs_new_successful_work(self):
         job = self.built_job()
         self.assertTrue(self.extend(job, 10)['ok'])
         again = self.extend(job, 10)
         self.assertFalse(again['ok'])
         self.assertIn('since the previous extension', again['summary'])
         self.assertEqual(len(job.state['extensions']), 1)
-        job.state.update(builds=2, lastQualifiedBuild=2)
+        self.progress(job)  # For example a successful tap or observation.
         self.assertTrue(self.extend(job, 10)['ok'])
         self.assertEqual(len(job.state['extensions']), 2)
 
-    def test_total_cap_limits_grant_and_count_cap_refuses(self):
+    def test_total_cap_limits_grant(self):
         job = self.built_job()
         deadline = job.deadline
-        self.assertEqual(self.extend(job, 30)['grantedMinutes'], 30)
-        job.state.update(builds=2, lastQualifiedBuild=2)
-        self.assertEqual(self.extend(job, 25)['grantedMinutes'], 25)
-        job.state.update(builds=3, lastQualifiedBuild=3)
+        for minutes in (30, 30, 30, 25):
+            self.assertEqual(self.extend(job, minutes)['grantedMinutes'], minutes)
+            self.progress(job)
         capped = self.extend(job, 30)
         self.assertTrue(capped['ok'])
-        self.assertEqual((capped['grantedMinutes'], capped['totalMinutes']), (5, 120))
-        self.assertIn('limited by the 120-minute total cap', capped['summary'])
-        self.assertEqual(job.deadline, deadline + 3600)
-        job.state.update(lastQualifiedBuild=4)
+        self.assertEqual((capped['grantedMinutes'], capped['totalMinutes']), (5, 240))
+        self.assertIn('limited by the 240-minute total cap', capped['summary'])
+        self.assertEqual(job.deadline, deadline + 120 * 60)
+        self.assertEqual(capped['progress']['controllerExtensionsRemaining'], 0)
+
+    def test_count_cap_refuses_after_the_last_grant(self):
+        job = self.built_job(minutes=5)
+        deadline = job.deadline
+        for _ in range(bridge.MAX_EXTENSIONS):
+            self.assertTrue(self.extend(job, 5)['ok'])
+            self.progress(job)
         refused = self.extend(job, 5)
         self.assertFalse(refused['ok'])
-        self.assertIn('used all 3 time extensions', refused['summary'])
-        self.assertEqual(job.deadline, deadline + 3600)
+        self.assertIn('used all %d time extensions' % bridge.MAX_EXTENSIONS, refused['summary'])
+        self.assertEqual(job.deadline, deadline + bridge.MAX_EXTENSIONS * 300)
         self.assertEqual(refused['progress']['controllerExtensionsRemaining'], 0)
+
+    def test_extending_an_expired_job_says_it_expired(self):
+        job = self.built_job()
+        job.stop('expired')
+        result = self.extend(job, 10)
+        self.assertFalse(result['ok'])
+        self.assertIn('expired at its controller deadline', result['summary'])
+        self.assertNotIn('cancelled', result['summary'])
 
     def test_total_cap_refuses_once_reached(self):
         job = self.built_job()
-        job.state['extensions'] = [{'seconds': 3600, 'afterQualifiedBuild': 0}]
+        job.state['extensions'] = [{'seconds': 7200, 'afterProgress': 0}]
         deadline = job.deadline
         result = self.extend(job, 5)
         self.assertFalse(result['ok'])
-        self.assertIn('120-minute total time cap', result['summary'])
+        self.assertIn('240-minute total time cap', result['summary'])
         self.assertEqual(job.deadline, deadline)
 
     def test_receipts_stop_offering_extensions_once_the_total_cap_is_used(self):
@@ -2559,14 +2640,15 @@ class TimeExtensionTests(SandboxCase):
         first = self.extend(job, 30)
         self.assertIn('this request used one work action', first['summary'])
         self.assertNotIn('actions are unchanged', first['summary'])
-        self.assertEqual(first['progress']['controllerExtensionsRemaining'], 2)
-        self.assertIn('at most 30 more minutes', first['progressSummary'])
-        job.state.update(builds=2, lastQualifiedBuild=2)
-        second = self.extend(job, 30)
-        self.assertEqual(second['totalMinutes'], 120)
-        # Two grants remain by count, but the 120-minute total already includes the initial 60.
-        self.assertEqual(second['progress']['controllerExtensionsRemaining'], 0)
-        self.assertNotIn('The extend action can add', second['progressSummary'])
+        self.assertEqual(first['progress']['controllerExtensionsRemaining'], bridge.MAX_EXTENSIONS - 1)
+        self.assertIn('at most 90 more minutes', first['progressSummary'])
+        for _ in range(3):
+            self.progress(job)
+            last = self.extend(job, 30)
+        self.assertEqual(last['totalMinutes'], 240)
+        # Grants remain by count, but the 240-minute total already includes the initial 120.
+        self.assertEqual(last['progress']['controllerExtensionsRemaining'], 0)
+        self.assertNotIn('The extend action can add', last['progressSummary'])
 
     def test_running_guest_deadline_moves_with_the_job(self):
         job = self.built_job()
@@ -2656,3 +2738,109 @@ class TimeExtensionTests(SandboxCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ContinuationTests(SandboxCase):
+    """A session may continue after a job ends, but only with what its earlier jobs left."""
+    request = InitialTimeLimitTests.request
+    prepare = InitialTimeLimitTests.prepare
+
+    def finished(self, status='stopped', **used):
+        job = bridge.Job(ACTOR)
+        job.stop_worker = Mock(return_value={"running": False})
+        job.retire_cache = Mock(return_value={"status": "not-created", "complete": True})
+        job.state.update(**used)
+        job.stop(status)
+        return job
+
+    def test_expired_job_continues_with_the_session_remainder(self):
+        old = self.finished('expired', writes=5, builds=4, actions=19)
+        controller = bridge.Controller()
+        old.state['cleanup']['finishedAt'] = old.state['createdAt'] + 61 * 60 + 30  # Rounds up to 62 minutes.
+        old.persist()
+        job, result = self.prepare(controller, self.request(rid='continue-after-expiry'))
+        self.assertTrue(result['ok'])
+        self.assertEqual(job.state['continuesJob'], old.id)
+        self.assertEqual(job.state['limits'], {'writes': bridge.MAX_WRITES - 5, 'builds': bridge.MAX_BUILDS - 4,
+                                               'actions': bridge.MAX_ACTIONS - 19, 'minutes': bridge.MAX_TOTAL_MINUTES - 62})
+        self.assertEqual(job.state['deadlineSeconds'], bridge.DEFAULT_TIME_LIMIT_MINUTES * 60)
+        self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 4)
+        self.assertEqual(result['progress']['actionsRemaining'], bridge.MAX_ACTIONS - 19 - 1)
+
+    def test_continuation_time_is_capped_by_the_session_remainder(self):
+        old = self.finished('stopped')
+        old.state['cleanup']['finishedAt'] = old.state['createdAt'] + 200 * 60
+        old.persist()
+        job, result = self.prepare(bridge.Controller(), self.request(rid='long-continuation', timeLimitMinutes=240))
+        self.assertEqual(job.state['deadlineSeconds'], (bridge.MAX_TOTAL_MINUTES - 120) * 60)
+        self.assertEqual(job.state['limits']['minutes'], bridge.MAX_TOTAL_MINUTES - 120,
+                         'elapsed time is capped at what the earlier job was allotted')
+
+    def test_session_totals_hold_across_several_continuations(self):
+        first = self.finished('stopped', builds=6)
+        controller = bridge.Controller()
+        second, _ = self.prepare(controller, self.request(rid='second'))
+        self.assertEqual(second.state['limits']['builds'], bridge.MAX_BUILDS - 6)
+        second.stop_worker = Mock(return_value={"running": False})
+        second.retire_cache = Mock(return_value={"status": "not-created", "complete": True})
+        second.state['builds'] = bridge.MAX_BUILDS - 6
+        second.stop('stopped')
+        with patch.object(bridge, 'Job', side_effect=AssertionError('limits reset')):
+            refused = controller.dispatch(self.request(rid='third'))
+        self.assertFalse(refused['ok'])
+        self.assertIn('builds', refused['summary'])
+        self.assertEqual(refused['jobId'], second.id)
+
+    def test_offline_client_refuses_an_exhausted_session_without_starting_the_controller(self):
+        self.finished('stopped', builds=bridge.MAX_BUILDS)
+        stdin = types.SimpleNamespace(buffer=io.BytesIO(json.dumps(self.request(rid='offline-exhausted')).encode()))
+        stdout = io.StringIO()
+        with patch.object(bridge, 'SOCKET', bridge.ROOT / 'absent.sock'), patch.object(bridge.sys, 'stdin', stdin), \
+                patch.object(bridge.sys, 'stdout', stdout), patch.object(bridge.subprocess, 'Popen', side_effect=AssertionError('controller started')):
+            bridge.client()
+        receipt = json.loads(stdout.getvalue())
+        self.assertFalse(receipt['ok'])
+        self.assertIn('cannot start another job', receipt['summary'])
+
+    def test_work_on_an_ended_job_after_idle_shutdown_is_answered_not_failed(self):
+        old = self.finished('expired')
+        for action, extra in (('build', {}), ('extend', {'extendMinutes': 10, 'reason': 'More checks remain.'}), ('observe', {})):
+            request = {'actor': ACTOR, 'requestId': 'late-' + action, 'params': {'action': action, 'jobId': old.id, **extra}}
+            stdin = types.SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))
+            stdout = io.StringIO()
+            with self.subTest(action=action), patch.object(bridge, 'SOCKET', bridge.ROOT / 'absent.sock'), \
+                    patch.object(bridge.sys, 'stdin', stdin), patch.object(bridge.sys, 'stdout', stdout), \
+                    patch.object(bridge.subprocess, 'Popen', side_effect=AssertionError('controller started')):
+                bridge.client()
+                receipt = json.loads(stdout.getvalue())
+                self.assertFalse(receipt['ok'])
+                self.assertIn('has ended (expired)', receipt['summary'])
+                self.assertIn('starts a continuation job', receipt['summary'])
+        self.assertFalse(bridge.cancellation_path(ACTOR).exists())
+        job, result = self.prepare(bridge.Controller(), self.request(rid='continue-after-late-calls'))
+        self.assertEqual(job.state['continuesJob'], old.id)
+
+    def test_replayed_prepare_request_never_creates_another_job(self):
+        controller = bridge.Controller()
+        first, _ = self.prepare(controller, self.request(rid='prepare-once'))
+        first.stop_worker = Mock(return_value={"running": False})
+        first.retire_cache = Mock(return_value={"status": "not-created", "complete": True})
+        first.stop('stopped')
+        for target in (controller, bridge.Controller()):
+            with self.subTest(restarted=target is not controller), patch.object(bridge, 'Job', side_effect=AssertionError('replay created a job')):
+                replay = target.dispatch(self.request(rid='prepare-once'))
+                # The live controller returns the recorded receipt; a restarted one reports the ended job.
+                self.assertEqual(replay['jobId'], first.id)
+                self.assertEqual([j.id for j in target.jobs.values() if j.id != first.id], [])
+
+    def test_ended_job_receipts_do_not_invite_a_refused_continuation(self):
+        old = self.finished('stopped', builds=bridge.MAX_BUILDS)
+        refusal = bridge.Controller().dispatch(self.request(rid='exhausted'))
+        self.assertIn('cannot start another job', refusal['summary'])
+        self.assertNotIn('continuation', refusal['progressSummary'])
+        uncertain = bridge.Job(ACTOR.replace('chat-a', 'chat-u'))
+        uncertain.state['status'] = 'cleanup-uncertain'
+        with self.assertRaisesRegex(bridge.Refused, 'operator review') as raised:
+            uncertain.check()
+        self.assertNotIn('continuation', str(raised.exception))
+

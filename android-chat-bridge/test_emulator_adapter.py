@@ -97,6 +97,9 @@ class Session(adapter.EmulatorSession):
         self.tap_released = threading.Event()
         self.slow_tap = 0
         self.ui_xml = b'<?xml version="1.0"?><hierarchy/>'
+        self.splash_checks = 0
+        self.window_failure = False
+        self.window_errors_after = None
         super().__init__(*args, **kwargs)
 
     def _spawn(self, command, name, service=False):
@@ -148,6 +151,18 @@ class Session(adapter.EmulatorSession):
         if args[:2] == ['exec-out', 'cat']:
             self.clock.value += .25  # A tree dump completes after its screenshot.
             return self.ui_xml
+        if args[:4] == ['shell', 'dumpsys', 'window', 'windows']:
+            if self.window_failure:
+                raise adapter.EmulatorError('ADB command deadline exceeded')
+            if self.window_errors_after is not None:
+                if self.window_errors_after == 0:
+                    return b'error: closed\n'  # What a non-checked transport failure would print.
+                self.window_errors_after -= 1
+            windows = b'  Window #0 Window{a1 u0 org.openclaw.trial/org.openclaw.trial.MainActivity}:\n'
+            if self.splash_checks:
+                self.splash_checks -= 1
+                windows += b'  Window #1 Window{b2 u0 Splash Screen org.openclaw.trial}:\n'
+            return windows
         if args[:2] == ['shell', 'pidof']:
             return b'' if self.startup_crash else b'321\n'
         if args[:3] == ['shell', 'input', 'tap']:
@@ -281,6 +296,51 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(Path(receipt['screenshot']['path']).exists())
         self.assertTrue(Path(receipt['crashes']['path']).exists())
         self.assertFalse(session._stopping)
+
+    def test_launch_frame_waits_for_the_splash_window_to_close(self):
+        session = self.session()
+        session.splash_checks = 3
+        receipt = session.start()
+        settle = receipt['launchSettle']
+        self.assertEqual((settle['status'], settle['splashSeen'], settle['checks']), ('splash-closed', True, 4))
+        commands = session.commands
+        last_window_check = max(i for i, c in enumerate(commands) if c[:3] == ['shell', 'dumpsys', 'window'])
+        launch_frame = next(i for i, c in enumerate(commands) if c[:3] == ['exec-out', 'screencap', '-p'])
+        self.assertLess(last_window_check, launch_frame, 'the launch frame follows the closed splash window')
+        # Three 0.25 s polls while the splash shows, then a 0.3 s settle before the frame.
+        self.assertEqual(settle['waitedMs'], 1050)
+        self.assertGreaterEqual(receipt['initialObservation']['screenshot']['monotonic'], settle['monotonic'])
+
+    def test_launch_without_a_visible_splash_does_not_wait(self):
+        receipt = self.session().start()
+        self.assertEqual((receipt['launchSettle']['status'], receipt['launchSettle']['checks']), ('no-splash-seen', 1))
+        self.assertEqual(receipt['launchSettle']['waitedMs'], 0)
+
+    def test_a_lingering_splash_is_reported_and_never_fails_the_launch(self):
+        session = self.session()
+        session.splash_checks = 10_000
+        receipt = session.start()
+        self.assertEqual(receipt['launchSettle']['status'], 'splash-still-present')
+        self.assertGreaterEqual(receipt['launchSettle']['waitedMs'], 10_000)
+        self.assertLess(receipt['launchSettle']['waitedMs'], 11_000)
+        self.assertEqual(receipt['initialObservation']['screenshot']['width'], 480)
+        self.assertEqual(session.stop()['status'], 'stopped')
+
+    def test_output_that_is_not_a_window_list_never_reads_as_a_closed_splash(self):
+        session = self.session()
+        session.splash_checks, session.window_errors_after = 5, 1
+        receipt = session.start()
+        settle = receipt['launchSettle']
+        self.assertEqual((settle['status'], settle['splashSeen']), ('unavailable', True))
+        self.assertIn('window list unavailable', settle['reason'])
+
+    def test_window_inspection_failure_is_advisory(self):
+        session = self.session()
+        session.window_failure = True
+        receipt = session.start()
+        self.assertEqual(receipt['launchSettle']['status'], 'unavailable')
+        self.assertIn('deadline', receipt['launchSettle']['reason'])
+        self.assertIn('screenshot', receipt['initialObservation'])
 
     def test_startup_crash_is_retained_without_any_log_clear(self):
         session = self.session()

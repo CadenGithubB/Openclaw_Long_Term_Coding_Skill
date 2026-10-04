@@ -39,19 +39,27 @@ ENV = {'HOME': '/CONFIGURE/service-home', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin
        'DOCKER_HOST': 'unix:///CONFIGURE/docker.sock'}
 MAX_REQUEST = 600 * 1024
 MAX_RESPONSE = 5 * 1024 * 1024
-DEFAULT_TIME_LIMIT_MINUTES = 60
+DEFAULT_TIME_LIMIT_MINUTES = 120
 MIN_TIME_LIMIT_MINUTES = 5
-MAX_TIME_LIMIT_MINUTES = 60
-# Extensions add controller time only after verified progress; never attempts.
+MAX_TIME_LIMIT_MINUTES = 240
+# Extensions add controller time only after new successful work; never attempts.
 MIN_EXTENSION_MINUTES = 5
 MAX_EXTENSION_MINUTES = 30
-MAX_EXTENSIONS = 3
+MAX_EXTENSIONS = 8
+# Receipts urge an early extension request once this little controller time is left.
+EXTENSION_WARNING_SECONDS = 15 * 60
 # Per-job work budgets. Every guest and build call keeps its own time cap, and the
 # job deadline still bounds the total; these only bound repair/test iterations.
 MAX_WRITES = 20
 MAX_BUILDS = 10
 MAX_ACTIONS = 120
-MAX_TOTAL_MINUTES = 120
+MAX_TOTAL_MINUTES = 240
+# A chat session's jobs share these totals: a continuation job receives only what
+# its earlier jobs left, so ending a job and preparing another never resets them.
+SESSION_LIMITS = {'writes': MAX_WRITES, 'builds': MAX_BUILDS, 'actions': MAX_ACTIONS, 'minutes': MAX_TOTAL_MINUTES}
+CONTINUATION_HINT = ' If requested work remains, prepare (without jobId) starts a continuation job with what this chat session has left of its limits.'
+# Successful work that counts as progress for an extension.
+PROGRESS_ACTIONS = ('write_sources', 'build', 'start_test', 'tap', 'observe')
 MAX_REPORT_BYTES = 128 * 1024
 JAVA_NAME = re.compile(r'[A-Z][A-Za-z0-9_]{0,63}\.java\Z')
 JOB_NAME = re.compile(r'am-[a-f0-9]{32}\Z')
@@ -85,14 +93,25 @@ def digest(data):
 
 def validate_time_limit(value):
     require(type(value) is int and MIN_TIME_LIMIT_MINUTES <= value <= MAX_TIME_LIMIT_MINUTES,
-            'timeLimitMinutes must be an integer from 5 to 60, chosen only for a new job')
+            'timeLimitMinutes must be an integer from %d to %d, chosen only for a new job'
+            % (MIN_TIME_LIMIT_MINUTES, MAX_TIME_LIMIT_MINUTES))
     return value
+
+def job_limits(state):
+    """A job's own budgets; jobs recorded before per-job limits use the current defaults."""
+    limits = state.get('limits') if isinstance(state.get('limits'), dict) else {}
+    return {key: limits[key] if type(limits.get(key)) is int and limits[key] >= 0 else default
+            for key, default in SESSION_LIMITS.items()}
 
 def recorded_time_limit(state):
     # deadlineSeconds predates the configurable limit; never substitute today's
     # default into historical evidence or reconstruct an old monotonic deadline.
     seconds = state.get('deadlineSeconds')
     return seconds // 60 if type(seconds) is int and seconds > 0 and seconds % 60 == 0 else None
+
+def is_interruption(request_id):
+    """The plugin's cleanup request after an aborted or unverifiable call (never model-chosen)."""
+    return isinstance(request_id, str) and request_id.endswith(':abort')
 
 def cancellation_path(actor):
     return ROOT / 'cancelled-sessions' / (digest(actor.encode()) + '.json')
@@ -219,7 +238,9 @@ def with_progress(state, result, deadline=None):
     ended = state.get('status') in TERMINAL
     seconds = 0 if ended else (max(0, int(deadline - time.monotonic())) if deadline is not None else None)
     progress = {'sourceRevision': revision, 'qualifiedApkSourceRevision': revision if qualified else None}
-    for key, limit in (('writes', MAX_WRITES), ('builds', MAX_BUILDS), ('actions', MAX_ACTIONS)):
+    budget = job_limits(state)
+    for key in ('writes', 'builds', 'actions'):
+        limit = budget[key]
         used = count(key)
         progress[key + 'Remaining'] = max(0, limit - used) if used is not None else None
     progress['controllerSecondsRemaining'] = seconds
@@ -231,7 +252,7 @@ def with_progress(state, result, deadline=None):
     progress['controllerExtensionMinutes'] = granted // 60
     # The total cap includes the initial limit, so it can run out before the grant count does.
     initial = state.get('deadlineSeconds')
-    capacity = MAX_TOTAL_MINUTES * 60 - initial - granted if type(initial) is int and initial > 0 else None
+    capacity = budget['minutes'] * 60 - initial - granted if type(initial) is int and initial > 0 else None
     progress['controllerExtensionsRemaining'] = (0 if ended or (capacity is not None and capacity < 60)
                                                  else max(0, MAX_EXTENSIONS - len(extensions)))
     if revision is None:
@@ -258,9 +279,18 @@ def with_progress(state, result, deadline=None):
         clock = ('Controller work time remaining: %s seconds; this is separate from the chat deadline, and a chat timeout does not confirm cleanup.'
                  % (seconds if seconds is not None else 'unknown'))
         if progress['controllerExtensionsRemaining']:
-            clock += (' The extend action can add 5 to 30 minutes after a new successful build since the last extension'
-                      ' (%d remaining; the %d-minute total includes the initial limit%s); it never extends the chat.'
-                      % (progress['controllerExtensionsRemaining'], MAX_TOTAL_MINUTES,
+            marks = state.get('progressMarks') if type(state.get('progressMarks')) is int else 0
+            last = extensions[-1].get('afterProgress', 0) if extensions and isinstance(extensions[-1], dict) else 0
+            if seconds is not None and seconds < EXTENSION_WARNING_SECONDS:
+                if marks > last:
+                    clock += (' Less than %d minutes remain and a model turn can take several minutes: if work remains,'
+                              ' call extend now with a reason instead of waiting for the deadline.' % (EXTENSION_WARNING_SECONDS // 60))
+                else:
+                    clock += (' Less than %d minutes remain. An extension first needs new successful work since the last grant;'
+                              ' otherwise finish or stop within the remaining time.' % (EXTENSION_WARNING_SECONDS // 60))
+            clock += (' The extend action can add 5 to 30 minutes after new successful work (a source write, build, launch, tap or observation)'
+                      ' since the last extension (%d remaining; the %d-minute total includes the initial limit%s); it never extends the chat.'
+                      % (progress['controllerExtensionsRemaining'], budget['minutes'],
                          '' if capacity is None else ', so at most %d more minutes' % (capacity // 60)))
     result = dict(result)
     result.update(status=state.get('status'), progress=progress)
@@ -317,8 +347,8 @@ def validate_request(request):
     require(isinstance(request['requestId'], str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,256}', request['requestId']), 'invalid request identity')
     return actor, params
 
-def retained_job(actor, job_id=None):
-    """Read a terminal record without constructing, adopting or updating a Job."""
+def retained_records(actor, job_id=None):
+    """Read this session's terminal records without constructing, adopting or updating a Job."""
     if job_id is not None:
         require(isinstance(job_id, str) and JOB_NAME.fullmatch(job_id), 'invalid job ID')
         paths = [ROOT / 'jobs' / job_id / 'state.json']
@@ -347,9 +377,70 @@ def retained_job(actor, job_id=None):
         require(type(created) in (int, float) and math.isfinite(created) and created >= 0, 'invalid retained creation time')
         require(state.get('status') in TERMINAL, 'retained job is unfinished; operator reconciliation is required, and no job was restarted')
         owned.append((path.parent, state))
+    return owned
+
+def retained_job(actor, job_id=None):
+    """The session's most recent terminal record, if any."""
+    owned = retained_records(actor, job_id)
     if not owned:
         return None
     return max(owned, key=lambda item: (item[1]['createdAt'], item[0].name))
+
+def minutes_used(state):
+    """Controller minutes a finished job consumed: elapsed time, never more than it was allotted."""
+    extensions = state.get('extensions') if isinstance(state.get('extensions'), list) else []
+    allotted = state.get('deadlineSeconds') if type(state.get('deadlineSeconds')) is int else MAX_TOTAL_MINUTES * 60
+    allotted += sum(item['seconds'] for item in extensions if isinstance(item, dict) and type(item.get('seconds')) is int and item['seconds'] > 0)
+    cleanup = state.get('cleanup') if isinstance(state.get('cleanup'), dict) else {}
+    finished, created = cleanup.get('finishedAt'), state.get('createdAt')
+    if type(finished) in (int, float) and type(created) in (int, float) and math.isfinite(finished) and finished >= created:
+        return math.ceil(min(allotted, finished - created) / 60)
+    return math.ceil(allotted / 60)
+
+def session_budget(actor):
+    """Limits still available to a chat session across all of its jobs.
+
+    Returns (remaining, None) or (None, reason). Earlier jobs must have ended with
+    confirmed cleanup; their usage is subtracted so a new job never resets limits.
+    """
+    used = dict.fromkeys(SESSION_LIMITS, 0)
+    for _, state in retained_records(actor):
+        cleanup = state.get('cleanup')
+        if state.get('status') == 'cleanup-uncertain' or not (isinstance(cleanup, dict) and cleanup.get('cleanupComplete') is True):
+            return None, ('An earlier Android job in this session ended without confirmed cleanup; operator review is required'
+                          ' before another job can start.')
+        for key in ('writes', 'builds', 'actions'):
+            value = state.get(key)
+            used[key] += value if type(value) is int and value >= 0 else SESSION_LIMITS[key]
+        used['minutes'] += minutes_used(state)
+    remaining = {key: max(0, limit - used[key]) for key, limit in SESSION_LIMITS.items()}
+    short = [name for name, key, least in (('source writes', 'writes', 1), ('builds', 'builds', 1),
+                                           ('actions', 'actions', 4), ('controller minutes', 'minutes', MIN_TIME_LIMIT_MINUTES))
+             if remaining[key] < least]
+    if short:
+        return None, ('This chat session has used its Android limits (%s exhausted: %d writes, %d builds, %d actions'
+                      ' and %d minutes were available in total). It cannot start another job.'
+                      % (', '.join(short), SESSION_LIMITS['writes'], SESSION_LIMITS['builds'],
+                         SESSION_LIMITS['actions'], SESSION_LIMITS['minutes']))
+    return remaining, None
+
+def ended_job_receipt(retained, action):
+    """An ok:false receipt for work aimed at an ended job; never a transport failure."""
+    directory, state = retained
+    hint = CONTINUATION_HINT if state.get('status') in ('stopped', 'expired', 'failed') else ''
+    return with_report(directory, with_progress(state, {'ok': False, 'jobId': state['jobId'], 'retryAllowed': False, 'status': state['status'],
+        'summary': 'This Android job has ended (%s) and cannot accept %s.%s Use status to read its report.' % (state['status'], action, hint)}))
+
+def prepare_already_served(actor, request_id, jobs=()):
+    """The job whose preparation already used this request ID, so a replay never creates another."""
+    for job in jobs:
+        if job.actor == actor and request_id in job.requests:
+            return (job.path, job.state)
+    name = 'request-%s.json' % digest(request_id.encode())[:24]
+    for directory, state in retained_records(actor):
+        if (directory / name).exists():
+            return directory, state
+    return None
 
 def retained_receipt(retained, action):
     """Serve recorded evidence only; do not infer cleanup from terminal status."""
@@ -636,8 +727,12 @@ print(json.dumps({'bytes':total,'files':files,'directories':directories}))
 '''
 
 class Job:
-    def __init__(self, actor, job_id=None, *, time_limit_minutes=DEFAULT_TIME_LIMIT_MINUTES):
+    def __init__(self, actor, job_id=None, *, time_limit_minutes=DEFAULT_TIME_LIMIT_MINUTES, limits=None, continues=None):
+        limits = dict(SESSION_LIMITS if limits is None else limits)
+        require(set(limits) == set(SESSION_LIMITS) and all(type(v) is int and 0 <= v <= SESSION_LIMITS[k] for k, v in limits.items()),
+                'invalid job limits')
         seconds = validate_time_limit(time_limit_minutes) * 60
+        require(seconds <= limits['minutes'] * 60, 'time limit exceeds the remaining session time')
         self.actor = actor
         self.id = job_id or 'am-' + uuid.uuid4().hex
         self.path = ROOT / 'jobs' / self.id
@@ -657,10 +752,15 @@ class Job:
         self.requests = {}
         self.state = {'jobId': self.id, 'actor': actor, 'createdAt': time.time(),
                       'timeLimitMinutes': time_limit_minutes, 'deadlineSeconds': seconds,
-                      'status': 'preparing', 'builds': 0,
+                      'status': 'preparing', 'builds': 0, 'limits': limits, 'progressMarks': 0,
                       'writes': 0, 'actions': 0, 'sourceRevision': 0, 'extensions': [], 'events': []}
+        if continues is not None:
+            self.state['continuesJob'] = continues
         self.path.mkdir(mode=0o700, parents=True)
         self.persist()
+
+    def limit(self, key):
+        return job_limits(self.state)[key]
 
     def persist(self):
         with self.state_lock:
@@ -686,7 +786,13 @@ class Job:
             self.persist()
 
     def check(self):
-        require(not self.cancelled.is_set(), 'job cancelled')
+        status = self.state['status']
+        require(status not in TERMINAL, {'expired': 'job expired at its controller deadline.' + CONTINUATION_HINT,
+                                         'stopped': 'job was stopped.' + CONTINUATION_HINT,
+                                         'failed': 'job failed and was stopped.' + CONTINUATION_HINT,
+                                         'cleanup-uncertain': 'job ended with uncertain cleanup; operator review is required'}.get(status, 'job is terminal'))
+        # Set when stop or expiry begins; the terminal status follows once cleanup finishes.
+        require(not self.cancelled.is_set(), 'job is stopping; cleanup is in progress and no further work is accepted')
         require(time.monotonic() < self.deadline, 'job deadline expired')
         require(self.state['status'] not in TERMINAL, 'job is terminal')
 
@@ -744,8 +850,9 @@ class Job:
             return hashed.hexdigest()
         def tail(path):
             with path.open('rb') as stream:
-                stream.seek(max(0, path.stat().st_size - 12000))
-                return stream.read(12000).decode(errors='replace')
+                # Two tails plus the label stay under the plugin's 16000-character summary bound.
+                stream.seek(max(0, path.stat().st_size - 7000))
+                return stream.read(7000).decode(errors='replace')
         receipt = {'argv': args, 'exitCode': p.returncode, 'startedAt': started,
                    'finishedAt': time.time(), 'log': str(log), 'logSha256': file_hash(log),
                    'stdoutBytes': log.stat().st_size, 'stderrLog': str(stderr_log),
@@ -881,7 +988,7 @@ class Job:
         return result
 
     def write_sources(self, files):
-        require(self.state['writes'] < MAX_WRITES, 'source revision budget exhausted')
+        require(self.state['writes'] < self.limit('writes'), 'source revision budget exhausted')
         if self.emulator is not None:
             cleanup = self.emulator.stop()
             self.event('retire_test_for_repair', 'Stop the previous guest before changing the app; its observations stay in the record.', cleanup)
@@ -908,7 +1015,7 @@ class Job:
         return {'summary': 'The original Java source was written inside the isolated worker. Any earlier APK qualification is now invalid; the next step is a fresh offline build.', 'sources': manifest, 'sourceRevision': self.state['sourceRevision']}
 
     def build(self):
-        require(self.state['builds'] < MAX_BUILDS, 'build budget exhausted')
+        require(self.state['builds'] < self.limit('builds'), 'build budget exhausted')
         require(self.emulator is None, 'stop the emulator before rebuilding')
         require(not self.state.get('testRequiresRepair') or (self.state['sourceRevision'] > self.state['failedTestSourceRevision'] and self.state.get('lastWrittenSourceRevision') == self.state['sourceRevision']),
                 'the failed guest test requires a new source write before another build')
@@ -973,17 +1080,19 @@ class Job:
         return self.observation_result(result, display)
 
     def extend(self, minutes, reason):
-        """Move the deadline later after verified build progress; writes and builds stay unchanged."""
+        """Move the deadline later after new successful work; writes and builds stay unchanged."""
         extensions = self.state.get('extensions', [])
         require(len(extensions) < MAX_EXTENSIONS, 'this job has used all %d time extensions' % MAX_EXTENSIONS)
-        qualified = self.state.get('lastQualifiedBuild')
-        previous = extensions[-1]['afterQualifiedBuild'] if extensions else 0
-        require(type(qualified) is int and qualified > previous,
-                'an extension requires a new successful build since %s; finish or stop with the remaining time'
-                % ('the previous extension' if extensions else 'preparation'))
+        progress = self.state.get('progressMarks', 0)
+        # Grants recorded before progress marks existed count as covering nothing newer.
+        previous = extensions[-1].get('afterProgress', 0) if extensions else 0
+        require(type(progress) is int and progress > previous,
+                'an extension requires new successful work (a source write, build, launch, tap or observation) since %s;'
+                ' finish or stop with the remaining time' % ('the previous extension' if extensions else 'preparation'))
+        total = self.limit('minutes')
         used = self.state['deadlineSeconds'] + sum(item['seconds'] for item in extensions)
-        available = MAX_TOTAL_MINUTES * 60 - used
-        require(available >= 60, 'this job has reached its %d-minute total time cap' % MAX_TOTAL_MINUTES)
+        available = total * 60 - used
+        require(available >= 60, 'this job has reached its %d-minute total time cap' % total)
         seconds = min(minutes * 60, available)
         deadline = self.deadline + seconds
         if self.emulator is not None:
@@ -991,14 +1100,14 @@ class Job:
             self.emulator.extend_deadline(deadline)
         self.deadline = deadline
         record = {'at': time.time(), 'requestedMinutes': minutes, 'seconds': seconds,
-                  'afterQualifiedBuild': qualified, 'reason': reason}
+                  'afterProgress': progress, 'reason': reason}
         self.update_state(extensions=extensions + [record])
         granted = seconds // 60
-        return {'summary': ('The controller deadline moved %d minutes later after verified build progress%s. Source writes and builds are unchanged; this request used one work action. '
+        return {'summary': ('The controller deadline moved %d minutes later after new successful work%s. Source writes and builds are unchanged; this request used one work action. '
                             'This does not extend the chat’s own timeout; if the chat ends first, the controller still stops the job at its deadline.'
-                            % (granted, '' if granted == minutes else ' (limited by the %d-minute total cap)' % MAX_TOTAL_MINUTES)),
+                            % (granted, '' if granted == minutes else ' (limited by the %d-minute total cap)' % total)),
                 'grantedMinutes': granted, 'requestedMinutes': minutes,
-                'totalMinutes': (used + seconds) // 60, 'maxTotalMinutes': MAX_TOTAL_MINUTES}
+                'totalMinutes': (used + seconds) // 60, 'maxTotalMinutes': total}
 
     def check_tap_target(self, params):
         """Refuse a tap outside the measured display before the adapter is called."""
@@ -1032,6 +1141,14 @@ class Job:
         collect(result)
         summary = 'These are actual Android guest observations and screenshots. Inspect the screens against the requested behavior; successful input or launch alone is not a gameplay pass.'
         response = {'summary': summary, 'observation': result, 'images': images}
+        settle = result.get('launchSettle') if isinstance(result, dict) else None
+        if isinstance(settle, dict):
+            if settle.get('status') == 'splash-closed':
+                summary += ' The launch screenshot was taken after the app\u2019s splash window closed.'
+            elif settle.get('status') in ('splash-still-present', 'unavailable'):
+                summary += (' The app\u2019s splash window may still cover the launch screenshot;'
+                            ' call observe before judging the initial screen.')
+            response['summary'] = summary
         if display is not None:
             response['display'] = {'width': display[0], 'height': display[1]}
             response['summary'] += (' Tap coordinates are actual pixels of this %dx%d display: 0 <= x < %d and 0 <= y < %d.'
@@ -1182,7 +1299,7 @@ class Job:
         require(self.lock.acquire(False), 'another operation is active for this job')
         try:
             self.check()
-            require(self.state['actions'] < MAX_ACTIONS, 'job action budget exhausted')
+            require(self.state['actions'] < self.limit('actions'), 'job action budget exhausted')
             self.state['actions'] += 1
             self.requests[request_id] = {'digest': hashed, 'result': None}
             atomic(self.path / ('request-%s.json' % digest(request_id.encode())[:24]), {'requestId': request_id, 'params': params, 'status': 'reserved'})
@@ -1200,6 +1317,10 @@ class Job:
             else: raise Refused('unsupported action')
             self.check()
             result.update(ok=True, jobId=self.id)
+            if action in PROGRESS_ACTIONS:
+                with self.state_lock:
+                    self.state['progressMarks'] = self.state.get('progressMarks', 0) + 1
+                    self.persist()
         except Exception as error:
             result = {'ok': False, 'jobId': self.id, 'summary': str(error)}
             if self.cancelled.is_set() or time.monotonic() >= self.deadline:
@@ -1209,7 +1330,7 @@ class Job:
                 # keep the running test and its qualified APK for a corrected tap.
                 result.update(error.details)
             elif action == 'start_test' and self.state.get('testRequiresRepair') and self.emulator is None:
-                result['repairAllowed'] = self.state['writes'] < MAX_WRITES and self.state['builds'] < MAX_BUILDS and self.state['actions'] <= MAX_ACTIONS - 3
+                result['repairAllowed'] = self.state['writes'] < self.limit('writes') and self.state['builds'] < self.limit('builds') and self.state['actions'] <= self.limit('actions') - 3
                 result['next'] = 'The failed guest is stopped. Write repaired source, build a new APK, then start a new test; the previous test directory is retained.'
             elif action in ('prepare', 'start_test'):
                 result['cleanup'] = self.stop('failed')
@@ -1233,7 +1354,7 @@ class Job:
                         result['repairAllowed'] = False
                         result['cleanup'] = self.stop('failed')
                     else:
-                        result['repairAllowed'] = self.state['writes'] < MAX_WRITES and self.state['builds'] < MAX_BUILDS and self.state['actions'] <= MAX_ACTIONS - 3
+                        result['repairAllowed'] = self.state['writes'] < self.limit('writes') and self.state['builds'] < self.limit('builds') and self.state['actions'] <= self.limit('actions') - 3
                         result['next'] = ('The guest is stopped. Inspect the retained failure, repair with write_sources, build again, then start_test within the remaining budgets.'
                                           if result['repairAllowed'] else 'The guest is stopped and repair budgets are exhausted. Use stop to retire the job cache and retain its evidence.')
                 else:
@@ -1260,27 +1381,61 @@ class Controller:
         actor, params = validate_request(request)
         self.last_activity = time.monotonic()
         with self.lock:
-            if params['action'] == 'stop':
+            interrupted = []
+            if params['action'] == 'stop' and is_interruption(request['requestId']):
+                # Only the plugin's cleanup after an interrupted call cancels the session;
+                # the model's own stop ends one job and may be followed by a continuation.
                 self.cancelled_actors.add(actor)
                 cancel_actor(actor)
+                # The interrupted call may have named an older job; retire every active one.
+                interrupted = [j for j in self.jobs.values() if j.actor == actor and j.state['status'] not in TERMINAL
+                               and j.id != params.get('jobId')]
             if params['action'] == 'prepare':
                 require(actor not in self.cancelled_actors and not cancellation_path(actor).exists(), 'preparation was cancelled for this session')
             matching = [j for j in self.jobs.values() if j.actor == actor]
             job = self.jobs.get(params.get('jobId')) if params.get('jobId') else (matching[-1] if matching else None)
+            continuing = None
+            if params['action'] == 'prepare' and (job is None or job.state['status'] in TERMINAL) and (job is None or request['requestId'] not in job.requests):
+                served = prepare_already_served(actor, request['requestId'], self.jobs.values())
+                if served is not None:
+                    return ended_job_receipt(served, 'a repeated preparation request') if served[1].get('status') in TERMINAL else \
+                        {'ok': False, 'jobId': served[1]['jobId'], 'summary': 'This preparation request was already handled; use status.', 'status': served[1].get('status')}
             if job is None and params['action'] in ('status', 'stop', 'prepare'):
                 retained = retained_job(actor, params.get('jobId'))
                 if retained is not None:
-                    return retained_receipt(retained, params['action'])
+                    if params['action'] != 'prepare':
+                        return retained_receipt(retained, params['action'])
+                    continuing = retained
+            elif job is not None and params['action'] == 'prepare' and request['requestId'] not in job.requests:
+                # Read the status under the job's lock: an expiry persists its terminal record there.
+                with job.state_lock:
+                    if job.state['status'] in TERMINAL:
+                        continuing = (job.path, job.state)
             if params.get('jobId'):
                 require(job is not None and job.actor == actor, 'job not owned by this session')
-            if params['action'] == 'prepare' and job is None:
+            created = False
+            if params['action'] == 'prepare' and (job is None or continuing is not None):
+                limits, minutes = None, params.get('timeLimitMinutes', DEFAULT_TIME_LIMIT_MINUTES)
+                if continuing is not None:
+                    limits, refusal = session_budget(actor)
+                    if refusal is not None:
+                        directory, state = continuing
+                        return with_report(directory, with_progress(state, {'ok': False, 'jobId': state['jobId'], 'retryAllowed': False,
+                                                                           'summary': refusal, 'status': state['status']}))
+                    minutes = min(validate_time_limit(minutes), limits['minutes'])
                 require(not any(j.state['status'] not in TERMINAL for j in self.jobs.values()), 'another Android job is active')
                 require(not any(j.state['status'] == 'cleanup-uncertain' for j in self.jobs.values()), 'prior cleanup needs operator review')
-                job = Job(actor, time_limit_minutes=params.get('timeLimitMinutes', DEFAULT_TIME_LIMIT_MINUTES))
+                job = Job(actor, time_limit_minutes=minutes, limits=limits,
+                          continues=continuing[1]['jobId'] if continuing is not None else None)
                 self.jobs[job.id] = job
+                created = True
             if job is None:
                 require(params['action'] in ('status','stop'), 'prepare an Android job first')
                 return {'ok': True, 'summary': 'This session has no active Android job.', 'status': 'none'}
+        for other in interrupted:
+            other.stop('stopped')
+        if created:
+            return job.perform(request['requestId'], params)
         if (params['action'] == 'prepare' and request['requestId'] not in job.requests
                 and 'timeLimitMinutes' in params and params['timeLimitMinutes'] * 60 != job.state.get('deadlineSeconds')):
             return job.receipt({'ok': False, 'jobId': job.id,
@@ -1362,20 +1517,34 @@ def client():
     request = json.loads(raw)
     actor, params = validate_request(request)
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if request['params']['action'] == 'stop':
+    if request['params']['action'] == 'stop' and is_interruption(request['requestId']):
         cancel_actor(actor)
     if request['params']['action'] == 'prepare':
         require(not cancellation_path(actor).exists(), 'preparation was cancelled for this session')
     # The fixed controller starts only for a preparation request, never model source.
     if not SOCKET.exists():
-        if params['action'] in ('status', 'stop', 'prepare'):
+        if params['action'] in ('status', 'stop'):
             retained = retained_job(actor, params.get('jobId'))
             if retained is not None:
                 result = retained_receipt(retained, params['action'])
                 print(json.dumps(result));return
             if params['action'] in ('status', 'stop'):
                 print(json.dumps({'ok':True,'summary':'No Android job for this session.','status':'none'}));return
+        if params['action'] != 'prepare':
+            # Work aimed at an ended job after the controller idled out is answered from the
+            # record. A transport failure here would make the plugin cancel the whole session.
+            retained = retained_job(actor, params.get('jobId'))
+            if retained is not None:
+                print(json.dumps(ended_job_receipt(retained, params['action'])));return
         require(request['params']['action'] == 'prepare', 'controller unavailable; no replay or automatic recovery')
+        # Refuse before spawning when this session has an unfinished record or no limits left.
+        retained = retained_job(actor)
+        if retained is not None:
+            _, refusal = session_budget(actor)
+            if refusal is not None:
+                directory, state = retained
+                print(json.dumps(with_report(directory, with_progress(state, {'ok': False, 'jobId': state['jobId'], 'retryAllowed': False,
+                                                                            'summary': refusal, 'status': state['status']}))));return
         history_admission()  # Give the caller the exact gate failure before spawn.
         log = (ROOT/'server.log').open('ab', buffering=0)
         subprocess.Popen(['/usr/bin/python3','-B',str(ROOT/'bridge.py'),'serve'], env=ENV, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)

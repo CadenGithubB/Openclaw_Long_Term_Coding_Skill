@@ -343,6 +343,41 @@ class EmulatorSession:
         self._ensure()
         return ui, summary
 
+    def _await_app_window(self, timeout=10):
+        """Advisory: let the app's starting (splash) window close before the launch frame.
+
+        `am start -W` returns once the activity draws, but under software rendering the
+        splash window can stay on top for seconds. The view tree cannot show this: it
+        reads the app's window underneath. This wait never fails the launch.
+        """
+        marker = ('Splash Screen ' + self.package).encode()
+        started, checks, seen = time.monotonic(), 0, False
+        while True:
+            try:
+                windows = self._adb(['shell', 'dumpsys', 'window', 'windows'], timeout=5)
+                # A missing marker means "closed" only in a real window dump.
+                require(b'Window{' in windows, 'window list unavailable')
+            except (EmulatorError, subprocess.TimeoutExpired) as error:
+                status, reason = 'unavailable', str(error)[:300]
+                break
+            checks += 1
+            present = marker in windows
+            seen = seen or present
+            if not present:
+                if seen:
+                    self._sleep(.3)  # Let the splash exit's last frame reach the display.
+                status, reason = ('splash-closed' if seen else 'no-splash-seen'), None
+                break
+            if time.monotonic() - started >= timeout:
+                status, reason = 'splash-still-present', None
+                break
+            self._sleep(.25)
+        result = {'status': status, 'splashSeen': seen, 'checks': checks,
+                  'waitedMs': int(round((time.monotonic() - started) * 1000)), **self._stamp()}
+        if reason:
+            result['reason'] = reason
+        return result
+
     def _observe(self, label):
         require(isinstance(label, str) and re.fullmatch('[a-zA-Z0-9_-]{1,40}', label), 'invalid observation label')
         require(self._started, 'test not started')
@@ -459,6 +494,8 @@ showDeviceFrame=no
                 require('Status: ok' in result['launch'], 'activity launch unconfirmed')
                 self._started = True
                 self._receipt['status'] = 'observing'
+                result['launchSettle'] = self._await_app_window()
+                self._flush()
                 result['initialObservation'] = self._observe('launch')
                 self._flush()
                 return result

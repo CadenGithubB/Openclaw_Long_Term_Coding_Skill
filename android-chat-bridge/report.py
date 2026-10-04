@@ -126,7 +126,14 @@ def write_report(job_dir, state):
         last = failures[-1]
         summary = mapping(last.get('result')).get('summary')
         diagnostics = java_diagnostics(summary) if last.get('action') == 'build' else []
-        if diagnostics:
+        later = events[events.index(last) + 1:]
+        repaired = any(e.get('action') == 'build' and mapping(e.get('result')).get('ok') is True for e in later)
+        if diagnostics and repaired:
+            lines += ['Earlier recorded failure: The Java compiler rejected an earlier source revision. A later build succeeded, so this failure no longer blocks testing.', '',
+                      'Selected source locations and compiler messages from that failed build are below. The full recorded failure summary remains in the controller state.', '']
+            lines += ['- ' + diagnostic for diagnostic in diagnostics]
+            lines.append('')
+        elif diagnostics:
             lines += ['Most recent recorded failure: The Java compiler rejected the source. After repairs, a new build is required before the repaired app can be tested.', '',
                       'Selected source locations and compiler messages are below. The full recorded failure summary remains in the controller state.', '']
             lines += ['- ' + diagnostic for diagnostic in diagnostics]

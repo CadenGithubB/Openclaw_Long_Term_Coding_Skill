@@ -90,3 +90,24 @@ Thinking blocks were recorded this time (18 non-empty blocks), unlike the mornin
 
 **What this does not establish.** It is one run of a small task. It did not use `observe`, tap bursts, `extend`, the out-of-display refusal or most of the raised budgets. It does not show whether the normal web chat displays the captures to the human (the session was created with `deliver: false`). It does not cover the bird-game requirements. The job `report.md` also still headlines the first compiler failure after the later successful build.
 
+
+## Stage 4AR bird-game trial (October 4, evening)
+
+After stage 4AR was deployed, one fresh chat ran the original Flappy-Bird-style request. It used a 60-minute controller job, a progress-gated extension, a two-hour chat timeout and High thinking. The operator supplied no code or repair. **The game requirements were not met.** The run did show what the next changes need to address.
+
+| Requirement | Observed result |
+| --- | --- |
+| Launch frame | The new settle step saw the splash window close after about one second. All three launch frames show the game, not the Android splash. |
+| Builds and repairs | Revision 1 failed with 12 compiler errors. Revision 3 built (revision 2 was overwritten without a build, against the skill). Revisions 4 and 5 added a game loop and a sizing guard. 5 writes, 4 builds and 19 actions were used of 20, 10 and 120. |
+| Tap to flap | Revision 3 ignored taps (no game loop). In revisions 4 and 5 the frame just after the tap shows play: bright sky, bird mid-screen, start text gone. |
+| Motion, pipes, score, collisions, game over, restart | NOT established. Each later observation, taken 30 or more seconds after the single tap, shows the bird on the ground with a small red "Game Over" and "Score: 0". |
+| Extension | Requested about a minute after the 60-minute deadline had passed, so it was refused. The controller then expired the job and confirmed cleanup. |
+| After expiry | The model tried to prepare a new job three times. The one-job-per-session rule refused each try, and the session ended with status `killed` at about 79 minutes. |
+
+**The model misread its own evidence.** The game appears to work as written: a bird that gets one flap falls to the ground within a second or two. The model observed the board half a minute later and concluded that the tap "isn't transitioning to PLAYING". It spent its last revision on a guard that was not the problem. It never used a tap burst (`count` with `intervalMs`), which keeps playing inside one action and returns frames from during the burst.
+
+**Vision did work.** The game draws on a single surface, so every UI tree was empty. The model's descriptions came from the images: "nearly identical" before and after frames for revision 3, the bird's movement, and the small "Game Over" and "Score: 0" text, which is really on screen. Its claim that a launch frame showed a "bobbing" bird could not come from one frame.
+
+**Turns slowed sharply as the context grew.** Turns took about 30 seconds early on. They took 4–7 minutes at 76,000–89,000 context tokens, including turns that produced only a hundred or so output tokens. That suggests the prompt was being reprocessed in full rather than reused from Ollama's cache, but the cause has not been investigated. The 60-minute job allowed only about a dozen turns at that pace.
+
+**The human saw no screenshots.** In the Control UI, every tool result showed its JSON receipt but no image. `chat.history` drops tool-result image data, and OpenClaw only accepts http(s) media URLs from plugin tools.

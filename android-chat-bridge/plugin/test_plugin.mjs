@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import plugin, { CONTROLLER, createTool, loadPng, register, runClient, validateParams } from './index.js';
+import plugin, { CONTROLLER, createScreenMirror, createTool, describeCapture, loadPng, register, runClient, validateParams } from './index.js';
 
 const JOB = 'am-' + '1'.repeat(32);
 const OTHER_JOB = 'am-' + '2'.repeat(32);
@@ -130,13 +130,14 @@ test('initial time budget is described without injecting a global or existing-jo
   const calls = [];
   const tool = createTool(CONTEXT, { client: async payload => { calls.push(payload); return response(); } });
   const field = tool.parameters.properties.timeLimitMinutes;
-  assert.equal(field.type, 'integer'); assert.equal(field.minimum, 5); assert.equal(field.maximum, 60);
+  assert.equal(field.type, 'integer'); assert.equal(field.minimum, 5); assert.equal(field.maximum, 240);
   assert.equal(Object.hasOwn(field, 'default'), false);
   assert.equal(tool.parameters.required.includes('timeLimitMinutes'), false);
   assert.match(field.description, /prepare only/);
-  assert.match(field.description, /new-job default of 60 minutes/);
-  assert.match(field.description, /cannot extend an existing job; nothing here extends the separate chat deadline/);
-  for (const params of [{ action: 'prepare' }, ...[5, 30, 60].map(timeLimitMinutes => ({ action: 'prepare', timeLimitMinutes }))]) {
+  assert.match(field.description, /default of 120 minutes/);
+  assert.match(field.description, /continuation job limited to what this chat session has left/);
+  assert.match(field.description, /Nothing here extends the separate chat deadline/);
+  for (const params of [{ action: 'prepare' }, ...[5, 30, 120, 240].map(timeLimitMinutes => ({ action: 'prepare', timeLimitMinutes }))]) {
     await tool.execute('call_initial_budget', params);
     assert.deepEqual(calls.at(-1).params, params);
   }
@@ -146,9 +147,9 @@ test('initial time budget is described without injecting a global or existing-jo
 test('initial time budget rejects nonintegers, coercion and out-of-range values before any client action', async () => {
   let calls = 0, coerced = false, getterRead = false;
   const tool = createTool(CONTEXT, { client: async () => { calls++; return response(); } });
-  const values = [undefined, null, true, false, '30', '5', 5.5, 30.5, 4, 61, 0, -5, Infinity, -Infinity, NaN, [], {}, new Number(30), { valueOf() { coerced = true; return 30; } }];
+  const values = [undefined, null, true, false, '30', '5', 5.5, 30.5, 4, 241, 0, -5, Infinity, -Infinity, NaN, [], {}, new Number(30), { valueOf() { coerced = true; return 30; } }];
   for (const timeLimitMinutes of values) {
-    await assert.rejects(tool.execute('call_invalid_budget', { action: 'prepare', timeLimitMinutes }), /timeLimitMinutes must be an integer from 5 to 60/);
+    await assert.rejects(tool.execute('call_invalid_budget', { action: 'prepare', timeLimitMinutes }), /timeLimitMinutes must be an integer from 5 to 240/);
   }
   const accessor = { action: 'prepare' };
   Object.defineProperty(accessor, 'timeLimitMinutes', { enumerable: true, get() { getterRead = true; return 30; } });
@@ -315,9 +316,11 @@ test('extend sends only bounded minutes with a reason and never reaches the cont
   await assert.rejects(tool.execute('call_limit_on_extend', { ...good, timeLimitMinutes: 60 }), /field does not apply to this action: "timeLimitMinutes"; extend accepts/);
   assert.equal(calls.length, 1);
   const tool2 = createTool(CONTEXT);
-  assert.match(tool2.parameters.properties.extendMinutes.description, /new successful build/);
+  assert.match(tool2.parameters.properties.extendMinutes.description, /new successful work \(a source write, build, launch, tap or observation\)/);
+  assert.match(tool2.parameters.properties.extendMinutes.description, /well before the deadline/);
   assert.match(tool2.parameters.properties.extendMinutes.description, /Does not add source writes, builds, actions or chat time/);
-  assert.match(tool2.description, /new jobs default to 60/);
+  assert.match(tool2.description, /jobs default to 120/);
+  assert.match(tool2.description, /continuation job that receives only what this chat session has left/);
   assert.match(tool2.description, /never extends the separate chat deadline/);
 });
 
@@ -543,7 +546,8 @@ test('native image content is returned only through the validated loader', async
   });
   const result = await tool.execute('call_image', { action: 'observe', jobId: JOB });
   assert.deepEqual(loaded, { filename: '/validated/screen.png', jobId: JOB });
-  assert.deepEqual(result.content[1], image);
+  assert.equal(result.content[1].text, 'Screenshot 1/1 · observe');
+  assert.deepEqual(result.content[2], { ...image, alt: 'Screenshot 1/1 · observe' });
   assert.match(result.content[0].text, new RegExp(JOB));
   assert.deepEqual(JSON.parse(result.content[0].text).images, [{ path: '/validated/screen.png' }]);
   assert.equal(Object.hasOwn(result.details, 'images'), false);
@@ -697,3 +701,128 @@ test('client deadline and abort terminate its exact client without shell or grou
   await assert.rejects(runClient({}, { spawnProcess: abortFake.spawnProcess, signal: abort.signal }), { name: 'AbortError' });
   assert.deepEqual(abortFake.calls[0].signals, ['SIGTERM']);
 });
+
+const SHOT = `/jobs/${JOB}/emulator-2/emulator-x/0005-tap-before.png`;
+const SAVED = id => ({ id, path: `/state/media/inbound/${id}`, size: 9, contentType: 'image/png' });
+const UUID = '0b8c2a4e-1d2f-4a3b-9c8d-7e6f5a4b3c2d';
+
+test('captures carry a display url for the human while the model keeps the image data', async () => {
+  const image = { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
+  const calls = [];
+  const mirror = async (bytes, meta) => { calls.push({ bytes, meta }); return `media://inbound/androidshot-${meta.seq}---${UUID}.png`; };
+  const tool = createTool(CONTEXT, {
+    client: async () => response({ summary: 'Tapped.', images: [{ path: SHOT, width: 480, height: 800, atMs: Date.UTC(2026, 9, 4, 18, 2, 11) }] }),
+    readImage: async () => image, mirror,
+  });
+  const result = await tool.execute('call_mirror', { action: 'tap', jobId: JOB, x: 10, y: 20 });
+  const block = result.content.find(item => item.type === 'image');
+  assert.equal(block.data, image.data);
+  assert.equal(block.mimeType, 'image/png');
+  assert.equal(block.url, `media://inbound/androidshot-0005---${UUID}.png`);
+  assert.equal(block.alt, 'Screenshot 1/1 · tap · tap-before · 480x800 · 18:02:11Z');
+  assert.deepEqual(calls[0].meta, { jobId: JOB, seq: '0005' });
+  assert.ok(calls[0].bytes.equals(png));
+  for (const text of result.content.filter(item => item.type === 'text')) assert.doesNotMatch(text.text, /media:\/\//);
+  assert.equal(Object.hasOwn(result.details, 'media'), false);
+});
+
+test('a failed display copy never withholds the image from the model or stops the job', async () => {
+  const image = { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
+  const requests = [];
+  for (const mirror of [async () => null, async () => { throw new Error('store unavailable'); }]) {
+    const tool = createTool(CONTEXT, {
+      client: async payload => { requests.push(payload.params.action); return response({ summary: 'Observed.', images: [{ path: SHOT }] }); },
+      readImage: async () => image, mirror,
+    });
+    const result = await tool.execute('call_mirror_fail', { action: 'observe', jobId: JOB });
+    const block = result.content.find(item => item.type === 'image');
+    assert.equal(block.data, image.data);
+    assert.equal(Object.hasOwn(block, 'url'), false);
+  }
+  assert.deepEqual(requests, ['observe', 'observe']);
+});
+
+async function inboundStore() {
+  // Imported here so this helper does not depend on the file's other fixtures.
+  const { tmpdir } = await import('node:os');
+  const root = await fs.mkdtemp(path.join(await fs.realpath(tmpdir()), 'oc-media-'));
+  const dir = path.join(root, 'inbound');
+  await fs.mkdir(dir);
+  const saves = [];
+  const save = async (bytes, mime, subdir, max, name) => {
+    saves.push({ mime, subdir, max, name });
+    const id = `${name}---${UUID}.png`;
+    await fs.writeFile(path.join(dir, id), bytes);
+    return { id, path: path.join(dir, id), size: bytes.length, contentType: mime };
+  };
+  return { root, dir, saves, save };
+}
+
+test('screen mirror saves each distinct capture once into the inbound store and refuses anything else', async () => {
+  const store = await inboundStore();
+  const saves = store.saves;
+  const mirror = createScreenMirror(() => store.save);
+  const url = await mirror(png, { jobId: JOB, seq: '0002' });
+  assert.equal(url, `media://inbound/androidshot-0002---${UUID}.png`);
+  assert.equal(await mirror(Buffer.from(png), { jobId: JOB, seq: '0007' }), url, 'identical bytes reuse one copy');
+  assert.deepEqual(saves, [{ mime: 'image/png', subdir: 'inbound', max: 4 * 1024 * 1024, name: 'androidshot-0002' }]);
+  await fs.rm(path.join(store.dir, `androidshot-0002---${UUID}.png`));
+  assert.equal(await mirror(Buffer.from(png), { jobId: JOB, seq: '0009' }), `media://inbound/androidshot-0009---${UUID}.png`, 'a pruned copy is saved again');
+  assert.equal(saves.length, 2);
+  await fs.rm(store.root, { recursive: true, force: true });
+  for (const result of [SAVED('../escape.png'), SAVED(`other---${UUID}.png`), { id: `androidshot-0003---${UUID}.png`, path: `/state/media/outgoing/androidshot-0003---${UUID}.png` }, null, { id: 5 }]) {
+    const bad = createScreenMirror(() => async () => result);
+    assert.equal(await bad(png, { jobId: JOB, seq: '0003' }), null);
+  }
+  for (const resolve of [() => null, () => { throw new Error('runtime missing'); }, () => async () => { throw new Error('disk full'); }]) {
+    assert.equal(await createScreenMirror(resolve)(png, { jobId: JOB, seq: '0004' }), null);
+  }
+  assert.equal(await mirror(png, { jobId: JOB, seq: '../1' }), null, 'sequence labels are validated');
+});
+
+test('screen mirror gives up after its timeout and enforces a per-job cap', async () => {
+  const slow = createScreenMirror(() => () => new Promise(() => {}), { timeoutMs: 20 });
+  assert.equal(await slow(png, { jobId: JOB, seq: '0001' }), null);
+  const capped = createScreenMirror(() => async (bytes, mime, subdir, max, name) => SAVED(`${name}---${UUID}.png`));
+  const urls = [];
+  for (let i = 0; i < 405; i++) urls.push(await capped(Buffer.concat([png, Buffer.from([i & 255, i >> 8])]), { jobId: JOB, seq: String(i % 10000).padStart(4, '0') }));
+  assert.equal(urls.filter(Boolean).length, 400);
+  assert.ok(await capped(Buffer.concat([png, Buffer.from('other job')]), { jobId: OTHER_JOB, seq: '0001' }));
+});
+
+test('capture captions use only controller-recorded fields', () => {
+  assert.deepEqual(describeCapture({ path: SHOT, width: 480, height: 800, atMs: Date.UTC(2026, 9, 4, 18, 2, 11) }, 0, 2, 'tap'),
+                   { seq: '0005', caption: 'Screenshot 1/2 · tap · tap-before · 480x800 · 18:02:11Z' });
+  assert.deepEqual(describeCapture({ path: '/x/unexpected name.png', width: '480' }, 1, 2, 'observe'), { seq: '0002', caption: 'Screenshot 2/2 · observe' });
+});
+
+test('registered tool saves captures through the runtime media store and survives an unusable runtime', async () => {
+  const store = await inboundStore();
+  let factory;
+  const runtime = { channel: { get media() { return { saveMediaBuffer: store.save }; } } };
+  const image = { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
+  const deps = { client: async () => response({ summary: 'Observed.', images: [{ path: SHOT }] }), readImage: async () => image };
+  register({ runtime, registerTool(fn) { factory = fn; }, on() { assert.fail('no hooks'); } }, deps);
+  const result = await factory(CONTEXT).execute('call_registered', { action: 'observe', jobId: JOB });
+  const block = result.content.find(item => item.type === 'image');
+  assert.equal(block.url, `media://inbound/androidshot-0005---${UUID}.png`);
+  assert.equal(block.data, image.data);
+  assert.deepEqual(store.saves[0], { mime: 'image/png', subdir: 'inbound', max: 4 * 1024 * 1024, name: 'androidshot-0005' });
+  const hostile = new Proxy({}, { get() { throw new Error('runtime unavailable in setup mode'); } });
+  register({ runtime: hostile, registerTool(fn) { factory = fn; }, on() {} }, deps);
+  const plain = await factory(CONTEXT).execute('call_hostile_runtime', { action: 'observe', jobId: JOB });
+  const fallback = plain.content.find(item => item.type === 'image');
+  assert.equal(fallback.data, image.data);
+  assert.equal(Object.hasOwn(fallback, 'url'), false);
+  await fs.rm(store.root, { recursive: true, force: true });
+});
+
+test('an unusual capture record still yields a caption instead of failing the call', async () => {
+  const image = { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
+  const tool = createTool(CONTEXT, {
+    client: async () => response({ summary: 'Observed.', images: [{ path: SHOT, atMs: 1e300 }] }), readImage: async () => image,
+  });
+  const result = await tool.execute('call_odd_time', { action: 'observe', jobId: JOB });
+  assert.equal(result.content.find(item => item.type === 'image').alt, 'Screenshot 1/1 · observe');
+});
+

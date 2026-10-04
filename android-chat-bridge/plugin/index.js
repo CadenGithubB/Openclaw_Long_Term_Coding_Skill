@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 
@@ -12,6 +13,14 @@ const CLIENT_ERROR_LIMIT = 1000;
 const JOB_ID = /^am-[a-f0-9]{32}$/;
 const ACTIONS = ['prepare', 'write_sources', 'build', 'start_test', 'tap', 'observe', 'extend', 'status', 'stop'];
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+// Display copies for the human. chat.history drops tool-result image data, but the
+// Control UI renders an image block's media://inbound url through its authenticated
+// media route. The model still receives the original image data unchanged.
+const MIRROR_JOB_BYTES = 64 * 1024 * 1024;
+const MIRROR_JOB_IMAGES = 400;
+const MIRROR_TIMEOUT_MS = 5000;
+const SHOT_NAME = /^([0-9]{4})-([a-z0-9][a-z0-9-]{0,40})\.png$/;
+const MEDIA_ID = /^androidshot-[0-9]{4}(?:\.png)?---[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.png$/;
 
 export const PARAMETERS = {
   type: 'object', additionalProperties: false, required: ['action'],
@@ -19,8 +28,8 @@ export const PARAMETERS = {
     action: { type: 'string', enum: ACTIONS },
     jobId: { type: 'string', pattern: '^am-[a-f0-9]{32}$', description: 'Reuse the exact jobId returned by prepare. Required on every write_sources, build, start_test, tap, observe and extend call.' },
     reason: { type: 'string', maxLength: 1000 },
-    timeLimitMinutes: { type: 'integer', minimum: 5, maximum: 60, description: 'prepare only: choose the controller time budget on the first preparation of a new job. Omit for the new-job default of 60 minutes. Repeating prepare cannot extend an existing job; nothing here extends the separate chat deadline.' },
-    extendMinutes: { type: 'integer', minimum: 5, maximum: 30, description: 'extend only: request 5 to 30 more controller minutes. Granted only after a new successful build since the previous extension, at most 3 times; the 120-minute total includes the initial time limit. Requires a reason naming the remaining work. Does not add source writes, builds, actions or chat time.' },
+    timeLimitMinutes: { type: 'integer', minimum: 5, maximum: 240, description: 'prepare only: choose the controller time budget for a new job (5 to 240 minutes). Omit for the default of 120 minutes. Repeating prepare cannot extend an active job. After a job ends, a new prepare starts a continuation job limited to what this chat session has left. Nothing here extends the separate chat deadline.' },
+    extendMinutes: { type: 'integer', minimum: 5, maximum: 30, description: 'extend only: request 5 to 30 more controller minutes. Granted only after new successful work (a source write, build, launch, tap or observation) since the previous extension, at most 8 times; the 240-minute total includes the initial time limit (a continuation job’s total is what the session had left). Request it well before the deadline: a model turn can take several minutes. Requires a reason naming the remaining work. Does not add source writes, builds, actions or chat time.' },
     files: { type: 'array', description: 'Java class source files only. Construct the UI programmatically in Java; XML layouts, custom resources, dependency files and build scripts are not accepted.', minItems: 1, maxItems: 16, items: {
       type: 'object', additionalProperties: false, required: ['name', 'content'],
       properties: {
@@ -77,7 +86,7 @@ export function validateParams(value) {
   if (!['prepare', 'status', 'stop'].includes(value.action) && !Object.hasOwn(value, 'jobId')) invalid('jobId is required');
   if (Object.hasOwn(value, 'reason') && (typeof value.reason !== 'string' || value.reason.length > 1000)) invalid('reason is too long or is not text');
   if (Object.hasOwn(value, 'timeLimitMinutes') && (!Number.isInteger(value.timeLimitMinutes)
-      || value.timeLimitMinutes < 5 || value.timeLimitMinutes > 60)) invalid('timeLimitMinutes must be an integer from 5 to 60, chosen only on the first prepare');
+      || value.timeLimitMinutes < 5 || value.timeLimitMinutes > 240)) invalid('timeLimitMinutes must be an integer from 5 to 240, chosen only when preparing a job');
   if (value.action === 'extend') {
     if (!Number.isInteger(value.extendMinutes) || value.extendMinutes < 5 || value.extendMinutes > 30) invalid('extendMinutes must be an integer from 5 to 30');
     if (typeof value.reason !== 'string' || !value.reason.trim()) invalid('extend requires a reason naming the remaining work');
@@ -320,7 +329,57 @@ function receiptDetails(receipt) {
   return details;
 }
 
-export function createTool(ctx, { client = runClient, readImage = loadPng } = {}) {
+// Saves each distinct capture once into OpenClaw's inbound media store and returns its
+// media://inbound url, or null. Never throws: display failures must not affect the job.
+export function createScreenMirror(resolveSave, { timeoutMs = MIRROR_TIMEOUT_MS } = {}) {
+  const byHash = new Map();
+  const perJob = new Map();
+  return async function mirror(bytes, { jobId, seq }) {
+    try {
+      const save = resolveSave();
+      if (typeof save !== 'function' || !Buffer.isBuffer(bytes) || !/^[0-9]{4}$/.test(seq)) return null;
+      const hash = createHash('sha256').update(bytes).digest('hex');
+      const cached = byHash.get(hash);
+      if (cached) {
+        // OpenClaw may prune the copy (attachments.ttlHours) or the operator may delete it.
+        try { await fs.stat(cached.path); return cached.url; } catch { byHash.delete(hash); }
+      }
+      const used = perJob.get(jobId) ?? { bytes: 0, count: 0 };
+      if (used.count >= MIRROR_JOB_IMAGES || used.bytes + bytes.length > MIRROR_JOB_BYTES) return null;
+      // Count the attempt first: a save that outlives the timeout still writes its file.
+      perJob.delete(jobId);
+      perJob.set(jobId, { bytes: used.bytes + bytes.length, count: used.count + 1 });
+      if (perJob.size > 64) perJob.delete(perJob.keys().next().value);
+      let timer;
+      const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); });
+      let saved;
+      try {
+        saved = await Promise.race([Promise.resolve().then(() => save(bytes, 'image/png', 'inbound', PNG_LIMIT, `androidshot-${seq}`)), timeout]);
+      } finally { clearTimeout(timer); }
+      if (!saved || typeof saved.id !== 'string' || !MEDIA_ID.test(saved.id) || typeof saved.path !== 'string'
+          || path.basename(saved.path) !== saved.id || path.basename(path.dirname(saved.path)) !== 'inbound') return null;
+      const url = `media://inbound/${saved.id}`;
+      byHash.set(hash, { url, path: saved.path });
+      if (byHash.size > 512) byHash.delete(byHash.keys().next().value);
+      return url;
+    } catch {
+      return null;
+    }
+  };
+}
+
+// A plain caption built only from controller-recorded fields, never model text.
+export function describeCapture(image, index, total, action) {
+  const match = SHOT_NAME.exec(path.basename(typeof image?.path === 'string' ? image.path : ''));
+  const seq = match ? match[1] : String(index + 1).padStart(4, '0');
+  const parts = [`Screenshot ${index + 1}/${total}`, action];
+  if (match) parts.push(match[2]);
+  if (Number.isInteger(image?.width) && Number.isInteger(image?.height)) parts.push(`${image.width}x${image.height}`);
+  if (Number.isFinite(image?.atMs)) parts.push(new Date(image.atMs).toISOString().slice(11, 19) + 'Z');
+  return { seq, caption: parts.join(' · ') };
+}
+
+export function createTool(ctx, { client = runClient, readImage = loadPng, mirror = null } = {}) {
   // Catalog discovery can identify the agent before it has a concrete session.
   // Publish only the main-agent schema then; missing identity never authorizes execution.
   if (ctx?.agentId !== 'main') return null;
@@ -332,7 +391,7 @@ export function createTool(ctx, { client = runClient, readImage = loadPng } = {}
     // they were serialized as base64 text: the model could not see them and each
     // capture added roughly 17k context tokens. Direct-only keeps them images.
     catalogMode: 'direct-only',
-    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Call android_project directly with its parameters when it is in your direct tool list. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. On the first prepare, optionally choose timeLimitMinutes (integer 5 to 60; new jobs default to 60). Repeating prepare cannot extend an existing job. If more time is needed after a new successful build, extend adds 5 to 30 minutes (at most 3 times; 120 minutes in total including the initial limit); it never extends the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures attached as images; inspect them against the requested behavior and preserve incomplete checks. Observations include uiSummary: the visible text and controls with bounds and centers, captured separately after the screenshot. Tap x/y are actual pixels of the reported display, not a scaled range; a tap outside the display is refused without stopping the test. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
+    description: 'Create, build and test an original Android app through the prepared offline Java/SDK 35 worker and a separate private emulator. Call android_project directly with its parameters when it is in your direct tool list. Before implementation, read the available long-task-runner skill and call prepare for the actual environment check. When preparing, optionally choose timeLimitMinutes (integer 5 to 240; jobs default to 120). Repeating prepare cannot extend an active job; after a job ends, prepare starts a continuation job that receives only what this chat session has left of its limits. If more time is needed after new successful work, extend adds 5 to 30 minutes (at most 8 times; 240 minutes in total including the initial limit); ask well before the deadline, and it never extends the separate chat deadline. Retain its jobId, then use write_sources, build, start_test, tap and observe. write_sources accepts only Java class basenames such as MainActivity.java, with complete source in package org.openclaw.trial. Construct the UI programmatically using Android SDK APIs; no XML layouts, custom R.layout/R.id resources, external dependencies or pathnames. The controller owns the scaffold and build configuration. Returned screens are actual emulator captures attached as images; inspect them against the requested behavior and preserve incomplete checks. Observations include uiSummary: the visible text and controls with bounds and centers, captured separately after the screenshot. Tap x/y are actual pixels of the reported display, not a scaled range; a tap outside the display is refused without stopping the test. Use status to inspect and stop to retire the owned job. Explain each material action in plain language in reason. This tool cannot run host commands or download tools.',
     parameters: PARAMETERS,
     async execute(toolCallId, rawParams, signal) {
       if (!actor) invalid('missing or ambiguous trusted main-session identity');
@@ -350,12 +409,26 @@ export function createTool(ctx, { client = runClient, readImage = loadPng } = {}
         if (params.action === 'build' && !receipt.ok) record.summary = compactJavaFailure(receipt.summary);
         if (Object.hasOwn(receipt, 'reportText')) content.push({ type: 'text', text: receipt.reportText });
         content.push({ type: 'text', text: JSON.stringify(record, null, 2) });
-        for (const image of receipt.images ?? []) {
+        const images = receipt.images ?? [];
+        const captions = [], blocks = [];
+        for (const [index, image] of images.entries()) {
           const jobId = params.jobId ?? receipt.jobId;
           if (!image || typeof image !== 'object' || !JOB_ID.test(jobId ?? '')) invalid('screenshot is not tied to this job');
-          content.push(await readImage(image.path, jobId));
+          const block = await readImage(image.path, jobId);
           if (signal?.aborted) throw abortError();
+          let meta;
+          try { meta = describeCapture(image, index, images.length, params.action); }
+          catch { meta = { seq: String(index + 1).padStart(4, '0'), caption: `Screenshot ${index + 1}/${images.length} · ${params.action}` }; }
+          // Never put the media url in text: only the image block carries it.
+          let url = null;
+          if (mirror) {
+            try { url = await mirror(Buffer.from(block.data, 'base64'), { jobId, seq: meta.seq }); } catch { url = null; }
+          }
+          if (signal?.aborted) throw abortError();
+          blocks.push({ ...block, alt: meta.caption, ...(url ? { url } : {}) });
+          captions.push(meta.caption);
         }
+        if (blocks.length) content.push({ type: 'text', text: captions.join('\n') }, ...blocks);
         // AgentToolResult has content/details, not MCP's isError property. A
         // verified ok:false controller receipt remains available for a focused
         // repair; throwing here would incorrectly retire the writable job.
@@ -380,8 +453,18 @@ export function createTool(ctx, { client = runClient, readImage = loadPng } = {}
   };
 }
 
-export function register(api) {
-  api.registerTool(ctx => createTool(ctx), { names: ['android_project'], optional: true });
+// `deps` only lets tests replace the controller transport and image loader.
+export function register(api, deps = {}) {
+  const runtime = api?.runtime;
+  const mirror = createScreenMirror(() => {
+    try {
+      const save = runtime?.channel?.media?.saveMediaBuffer;
+      return typeof save === 'function' ? save : null;
+    } catch {
+      return null;
+    }
+  });
+  api.registerTool(ctx => createTool(ctx, { ...deps, mirror }), { names: ['android_project'], optional: true });
 }
 
 export default {
