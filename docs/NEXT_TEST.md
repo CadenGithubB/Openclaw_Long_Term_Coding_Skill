@@ -1,10 +1,10 @@
 # Instructions for the next authorized Android trial
 
-This is a proposed next-run procedure informed by the recorded counter failures. It was not injected into the completed or currently recorded diagnostic, and it does not establish that the underlying issues are fixed.
+This is the procedure for the next authorized trial, informed by the recorded counter runs. Stage 4AQ is deployed; its first counter trial passed, with the evidence problems listed in [TEST_RESULTS.md](TEST_RESULTS.md#stage-4aq-trial-october-4-afternoon). The next valuable trial is the original bird game, which exercises observation, tap bursts, longer work and possibly `extend`.
 
 ## Prepare the run
 
-Check the current deployed version and idle owned resources. Use one fresh local-model chat, request High thinking before generation if supported, and explicitly set its time budget. On the deployed stage 4AO final2 controller, use `chat.send.timeoutMs = 3600000` and select `timeLimitMinutes: 60` on the first Android `prepare`; its default is still 30. If the stage 4AP candidate is deployed, 60 is the default. Use `chat.send.timeoutMs = 7200000` so its progress-gated `extend` can actually be used. Record each extension request, whether it was granted, and its stated reason. Leave time before the earlier deadline for stop and checkpoint readback.
+Check the current deployed version and idle owned resources. Use one fresh local-model chat, request High thinking before generation if supported, and explicitly set its time budget. Stage 4AQ defaults new jobs to 60 minutes. Dispatch the chat with `chat.send.timeoutMs = 7200000` so the progress-gated `extend` can actually be used. Record each extension request, whether it was granted, and its stated reason. Leave time before the earlier deadline for stop and checkpoint readback.
 
 Use a new exact checkpoint title for the test, read it before writing, then verify each saved checkpoint with a readback. Do not reuse an ended job or reset its counters. Keep the full acceptance contract even if implementation is split into smaller milestones.
 
@@ -34,8 +34,12 @@ Verify both delivery paths end to end: the model receives supported native image
 
 Stop the job, inspect its cleanup receipt, and write/read back the final checkpoint with the actual results. Preserve failed attempts. Separate build, app behavior, checkpoint and cleanup outcomes, and describe operator assistance explicitly.
 
-The deployed stage 4AO final2 controller still stops the guest after an out-of-display tap and requires a source write plus rebuild before testing can resume. The undeployed stage 4AP candidate distinguishes the two cases, with fixture regression coverage (see [HANDOFF.md](HANDOFF.md)). Record which version the trial ran. If the candidate is deployed after its review, also check the following and report each as observed or NOT RUN:
+Record which version the trial ran. Stage 4AQ checks, with their status after the first 4AQ counter trial:
 
-- The launch and observe receipts include `uiSummary` with the counter text and both buttons, and their reported centers fall inside the display.
-- A tap's `afterUiSummary` shows the new count. If it disagrees with the screenshot, another observation resolves the disagreement.
-- If the model sends an out-of-display tap, the receipt reports `inputDelivered: false`. The next in-range tap then works on the same guest, without a write or build.
+- **Observed:** `tools.effective` lists `android_project` after the Gateway refresh, and the model called it directly rather than through `tool_call`.
+- **Observed:** `start_test` and `tap` results carry native image blocks with no base64 text. Context grew about 3,000 tokens per capture, mostly JSON receipt text; the image itself is roughly 375 tokens.
+- **Observed:** launch receipts include `uiSummary` with the counter text and both buttons, and tap centers inside the display. Each tap's `afterUiSummary` showed the new count, matching its after-frame.
+- **Failed:** the model's description of each screen matches the saved capture. It described the splash launch frame as showing the counter and did not observe again.
+- **NOT RUN:** an out-of-display tap reports `inputDelivered: false` and the next in-range tap works on the same guest without a write or build.
+- **NOT RUN:** `extend` is requested with a reason after a new successful build, and granted or refused as documented.
+- **NOT RUN:** the normal web chat shows the captured images to the human after a reload.

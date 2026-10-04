@@ -272,7 +272,7 @@ class ControllerTests(SandboxCase):
         for status in ("stopped", "failed", "expired", "cleanup-uncertain"):
             controller = bridge.Controller()
             job = self.job()
-            job.state.update(status=status, builds=3, writes=8, actions=40)
+            job.state.update(status=status, builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES, actions=bridge.MAX_ACTIONS)
             job.prepare = Mock(side_effect=AssertionError("terminal job preparation replay"))
             controller.jobs[job.id] = job
             before = copy.deepcopy(job.state)
@@ -401,16 +401,16 @@ class LifecycleTests(SandboxCase):
 
     def test_action_budget_prevents_worker_or_emulator_use(self):
         job = self.job()
-        job.state["actions"] = 40
+        job.state["actions"] = bridge.MAX_ACTIONS
         job.build = Mock(side_effect=AssertionError("over-budget build"))
         result = job.perform("build", {"action": "build"})
         self.assertFalse(result["ok"])
-        self.assertEqual(job.state["actions"], 40)
+        self.assertEqual(job.state["actions"], bridge.MAX_ACTIONS)
         job.build.assert_not_called()
 
     def test_build_and_write_budgets_fail_before_external_operations(self):
         job = self.job()
-        job.state.update(builds=3, writes=8)
+        job.state.update(builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES)
         with self.assertRaises(bridge.Refused):
             job.build()
         with self.assertRaises(bridge.Refused):
@@ -1024,10 +1024,10 @@ class AdapterFailureStateTests(SandboxCase):
 
     def test_failed_observation_does_not_reset_exhausted_repair_budgets(self):
         job, guest = self.make_testing_job('observe')
-        job.state.update(writes=8, builds=3, actions=39)
+        job.state.update(writes=bridge.MAX_WRITES, builds=bridge.MAX_BUILDS, actions=bridge.MAX_ACTIONS - 1)
         result = job.perform('observe-at-limit', {'action': 'observe'})
         self.assertFalse(result['repairAllowed'])
-        self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (8, 3, 40))
+        self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (bridge.MAX_WRITES, bridge.MAX_BUILDS, bridge.MAX_ACTIONS))
         self.assertEqual(job.state['status'], 'built')
         self.assertIn('budgets are exhausted', result['next'])
 
@@ -1255,7 +1255,7 @@ class CacheRetirementTests(SandboxCase):
 
     def test_success_deletes_only_derived_cache_and_retains_artifacts_and_limits(self):
         job, cache = self.cached_job()
-        job.state.update(builds=3, writes=8, actions=40)
+        job.state.update(builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES, actions=bridge.MAX_ACTIONS)
         source = job.work / 'project/app/src/main/java/org/openclaw/trial/MainActivity.java'
         before = source.read_bytes()
         with patch.object(bridge, 'raw_command', side_effect=self.command_response(job)):
@@ -1276,7 +1276,7 @@ class CacheRetirementTests(SandboxCase):
         self.assertEqual((job.path / 'keep.log').read_bytes(), b'build log')
         self.assertTrue((job.path / 'state.json').is_file())
         self.assertTrue((job.path / 'report.md').is_file())
-        self.assertEqual((job.state['builds'], job.state['writes'], job.state['actions']), (3, 8, 40))
+        self.assertEqual((job.state['builds'], job.state['writes'], job.state['actions']), (bridge.MAX_BUILDS, bridge.MAX_WRITES, bridge.MAX_ACTIONS))
         self.assertIn('Source files, APKs, logs', result['reportText'])
 
     def test_worker_stop_failure_keeps_cache_and_refuses_complete_cleanup(self):
@@ -1599,7 +1599,7 @@ class RetainedServiceTests(SandboxCase):
 
     def stored(self):
         job = self.job()
-        job.state.update(actions=39, builds=3, writes=8, sourceRevision=8)
+        job.state.update(actions=bridge.MAX_ACTIONS - 1, builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES, sourceRevision=bridge.MAX_WRITES)
         job.stop('failed')
         return job
 
@@ -1631,7 +1631,7 @@ class RetainedServiceTests(SandboxCase):
                         self.assertEqual(result['reportText'], before[Path('report.md')].decode())
                         self.assertNotIn('actor', result['state'])
                         self.assertNotIn('events', result['state'])
-                        self.assertEqual(result['state']['actions'], 39)
+                        self.assertEqual(result['state']['actions'], bridge.MAX_ACTIONS - 1)
                         self.assertEqual(self.files(old), before)
                         self.assertEqual(active.state, active_before)
                         self.assertEqual(controller.jobs, {active.id: active})
@@ -1847,7 +1847,7 @@ class ReconciliationAdmissionTests(SandboxCase):
         cid = bridge.digest(job.id.encode())
         job.state.update(status='cleanup-uncertain', actor=ACTOR, containerId=cid, workspace=str(job.work),
                          workspaceIdentity={'device': value.st_dev, 'inode': value.st_ino},
-                         builds=3, writes=8, actions=40, emulatorStatus='cleanup-unconfirmed',
+                         builds=bridge.MAX_BUILDS, writes=bridge.MAX_WRITES, actions=bridge.MAX_ACTIONS, emulatorStatus='cleanup-unconfirmed',
                          cleanup={'stopped': False, 'cleanupComplete': False, 'errors': ['emulator cleanup unconfirmed'],
                                   'worker': {'containerId': cid, 'running': False}, 'cache': {'complete': True},
                                   'emulator': {'status': 'cleanup-unconfirmed', 'ownedProcesses': [{'pid': 34522}, {'pid': 34518}],
@@ -1930,7 +1930,7 @@ class ReconciliationAdmissionTests(SandboxCase):
             receipt = controller.dispatch({'actor': ACTOR, 'requestId': action, 'params': {'action': action, 'jobId': old.id}})
             self.assertFalse(receipt['ok'])
             self.assertFalse(receipt['state']['cleanup']['cleanupComplete'])
-            self.assertEqual(receipt['state']['actions'], 40)
+            self.assertEqual(receipt['state']['actions'], bridge.MAX_ACTIONS)
         self.assertEqual(before, {p.name: p.read_bytes() for p in old.path.iterdir() if p.is_file()})
 
     def test_missing_marker_blocks_before_observing_or_creating_jobs(self):
@@ -2112,9 +2112,9 @@ class ReceiptProgressTests(SandboxCase):
         self.assertEqual(result['status'], job.state['status'])
         self.assertEqual(result['progress']['sourceRevision'], 1)
         self.assertIsNone(result['progress']['qualifiedApkSourceRevision'])
-        self.assertEqual(result['progress']['buildsRemaining'], 2)
-        self.assertEqual(result['progress']['writesRemaining'], 7)
-        self.assertEqual(result['progress']['actionsRemaining'], 39)
+        self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 1)
+        self.assertEqual(result['progress']['writesRemaining'], bridge.MAX_WRITES - 1)
+        self.assertEqual(result['progress']['actionsRemaining'], bridge.MAX_ACTIONS - 1)
         self.assertEqual(result['summary'], 'MainActivity.java:6: error: cannot find symbol')
         recorded = json.loads((job.path / 'state.json').read_text())
         self.assertEqual(recorded['events'][-1]['result'], result)
@@ -2154,9 +2154,9 @@ class ReceiptProgressTests(SandboxCase):
         self.assertEqual(result['status'], 'source-ready')
         self.assertEqual(result['progress']['sourceRevision'], 2)
         self.assertIsNone(result['progress']['qualifiedApkSourceRevision'])
-        self.assertEqual(result['progress']['writesRemaining'], 6)
-        self.assertEqual(result['progress']['buildsRemaining'], 2)
-        self.assertEqual(result['progress']['actionsRemaining'], 37)
+        self.assertEqual(result['progress']['writesRemaining'], bridge.MAX_WRITES - 2)
+        self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 1)
+        self.assertEqual(result['progress']['actionsRemaining'], bridge.MAX_ACTIONS - 3)
         self.assertIn('successful build is still required', result['progressSummary'])
         self.assertEqual((job.path / 'source-2/MainActivity.java').read_text(), source)
         self.assertTrue((job.path / 'app-build-1.apk').exists())
@@ -2187,7 +2187,7 @@ class ReceiptProgressTests(SandboxCase):
             second = job.perform('same-status', {'action': 'status'})
         self.assertEqual(first['progress']['controllerSecondsRemaining'], 299)
         self.assertEqual(second['progress']['controllerSecondsRemaining'], 259)
-        self.assertEqual(second['progress']['actionsRemaining'], 36)
+        self.assertEqual(second['progress']['actionsRemaining'], bridge.MAX_ACTIONS - 4)
         self.assertEqual(job.state['actions'], 4)
         self.assertEqual(job.deadline, 400)
         self.assertIn('separate from the chat deadline', second['progressSummary'])
@@ -2217,7 +2217,7 @@ class ReceiptProgressTests(SandboxCase):
 
     def test_expired_clock_and_exhausted_counters_never_show_negative_allowances(self):
         job = self.job()
-        job.state.update(status='ready', writes=8, builds=3, actions=40)
+        job.state.update(status='ready', writes=bridge.MAX_WRITES, builds=bridge.MAX_BUILDS, actions=bridge.MAX_ACTIONS)
         job.deadline = time.monotonic() - 1
         result = job.perform('expired-status', {'action': 'status'})
         for key in ('writesRemaining', 'buildsRemaining', 'actionsRemaining', 'controllerSecondsRemaining'):
@@ -2240,8 +2240,8 @@ class ReceiptProgressTests(SandboxCase):
                     self.assertEqual(result['status'], 'cleanup-uncertain')
                     self.assertEqual(result['progress']['controllerSecondsRemaining'], 0)
                     self.assertIsNone(result['progress']['actionsRemaining'])
-                    self.assertEqual(result['progress']['buildsRemaining'], 2)
-                    self.assertEqual(result['progress']['writesRemaining'], 6)
+                    self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 1)
+                    self.assertEqual(result['progress']['writesRemaining'], bridge.MAX_WRITES - 2)
                     self.assertIn('cannot continue', result['progressSummary'])
                     self.assertIn('does not confirm cleanup', result['progressSummary'])
         self.assertEqual({p.name: p.read_bytes() for p in job.path.iterdir() if p.is_file()}, original)
@@ -2278,7 +2278,7 @@ class InitialTimeLimitTests(SandboxCase):
                 self.assertEqual(saved['timeLimitMinutes'], expected)
                 self.assertEqual(saved['deadlineSeconds'], expected * 60)
                 self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (0, 0, 1))
-                self.assertEqual((result['progress']['writesRemaining'], result['progress']['buildsRemaining'], result['progress']['actionsRemaining']), (8, 3, 39))
+                self.assertEqual((result['progress']['writesRemaining'], result['progress']['buildsRemaining'], result['progress']['actionsRemaining']), (bridge.MAX_WRITES, bridge.MAX_BUILDS, bridge.MAX_ACTIONS - 1))
 
     def test_invalid_limits_fail_before_job_creation_or_external_operations(self):
         for value in (True, False, 4, 61, 0, -1, 30.0, 5.5, '30', None, [], {}, float('inf'), float('nan')):
@@ -2393,7 +2393,7 @@ class InitialTimeLimitTests(SandboxCase):
     def test_terminal_jobs_keep_original_time_and_budgets_when_reprepared(self):
         for status in bridge.TERMINAL:
             job = self.job()
-            job.state.update(status=status, timeLimitMinutes=5, deadlineSeconds=300, writes=8, builds=3, actions=40)
+            job.state.update(status=status, timeLimitMinutes=5, deadlineSeconds=300, writes=bridge.MAX_WRITES, builds=bridge.MAX_BUILDS, actions=bridge.MAX_ACTIONS)
             job.persist()
             controller = bridge.Controller()
             controller.jobs[job.id] = job
@@ -2502,7 +2502,7 @@ class TimeExtensionTests(SandboxCase):
         self.assertEqual((result['grantedMinutes'], result['requestedMinutes'], result['totalMinutes']), (20, 20, 80))
         self.assertIn('does not extend the chat', result['summary'])
         self.assertEqual((job.state['writes'], job.state['builds'], job.state['actions']), (0, 1, 2))
-        self.assertEqual(result['progress']['buildsRemaining'], 2)
+        self.assertEqual(result['progress']['buildsRemaining'], bridge.MAX_BUILDS - 1)
         self.assertEqual(result['progress']['controllerExtensionMinutes'], 20)
         self.assertEqual(result['progress']['controllerExtensionsRemaining'], 2)
         self.assertEqual(result['progress']['controllerTimeLimitMinutes'], 60)
@@ -2553,6 +2553,20 @@ class TimeExtensionTests(SandboxCase):
         self.assertFalse(result['ok'])
         self.assertIn('120-minute total time cap', result['summary'])
         self.assertEqual(job.deadline, deadline)
+
+    def test_receipts_stop_offering_extensions_once_the_total_cap_is_used(self):
+        job = self.built_job()
+        first = self.extend(job, 30)
+        self.assertIn('this request used one work action', first['summary'])
+        self.assertNotIn('actions are unchanged', first['summary'])
+        self.assertEqual(first['progress']['controllerExtensionsRemaining'], 2)
+        self.assertIn('at most 30 more minutes', first['progressSummary'])
+        job.state.update(builds=2, lastQualifiedBuild=2)
+        second = self.extend(job, 30)
+        self.assertEqual(second['totalMinutes'], 120)
+        # Two grants remain by count, but the 120-minute total already includes the initial 60.
+        self.assertEqual(second['progress']['controllerExtensionsRemaining'], 0)
+        self.assertNotIn('The extend action can add', second['progressSummary'])
 
     def test_running_guest_deadline_moves_with_the_job(self):
         job = self.built_job()

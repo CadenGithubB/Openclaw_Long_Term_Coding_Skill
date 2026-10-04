@@ -46,6 +46,11 @@ MAX_TIME_LIMIT_MINUTES = 60
 MIN_EXTENSION_MINUTES = 5
 MAX_EXTENSION_MINUTES = 30
 MAX_EXTENSIONS = 3
+# Per-job work budgets. Every guest and build call keeps its own time cap, and the
+# job deadline still bounds the total; these only bound repair/test iterations.
+MAX_WRITES = 20
+MAX_BUILDS = 10
+MAX_ACTIONS = 120
 MAX_TOTAL_MINUTES = 120
 MAX_REPORT_BYTES = 128 * 1024
 JAVA_NAME = re.compile(r'[A-Z][A-Za-z0-9_]{0,63}\.java\Z')
@@ -214,7 +219,7 @@ def with_progress(state, result, deadline=None):
     ended = state.get('status') in TERMINAL
     seconds = 0 if ended else (max(0, int(deadline - time.monotonic())) if deadline is not None else None)
     progress = {'sourceRevision': revision, 'qualifiedApkSourceRevision': revision if qualified else None}
-    for key, limit in (('writes', 8), ('builds', 3), ('actions', 40)):
+    for key, limit in (('writes', MAX_WRITES), ('builds', MAX_BUILDS), ('actions', MAX_ACTIONS)):
         used = count(key)
         progress[key + 'Remaining'] = max(0, limit - used) if used is not None else None
     progress['controllerSecondsRemaining'] = seconds
@@ -224,7 +229,11 @@ def with_progress(state, result, deadline=None):
     granted = sum(item['seconds'] for item in extensions
                   if isinstance(item, dict) and type(item.get('seconds')) is int and item['seconds'] > 0)
     progress['controllerExtensionMinutes'] = granted // 60
-    progress['controllerExtensionsRemaining'] = 0 if ended else max(0, MAX_EXTENSIONS - len(extensions))
+    # The total cap includes the initial limit, so it can run out before the grant count does.
+    initial = state.get('deadlineSeconds')
+    capacity = MAX_TOTAL_MINUTES * 60 - initial - granted if type(initial) is int and initial > 0 else None
+    progress['controllerExtensionsRemaining'] = (0 if ended or (capacity is not None and capacity < 60)
+                                                 else max(0, MAX_EXTENSIONS - len(extensions)))
     if revision is None:
         source = 'The source revision is unknown; no current qualified APK is established.'
     elif revision == 0:
@@ -250,7 +259,9 @@ def with_progress(state, result, deadline=None):
                  % (seconds if seconds is not None else 'unknown'))
         if progress['controllerExtensionsRemaining']:
             clock += (' The extend action can add 5 to 30 minutes after a new successful build since the last extension'
-                      ' (%d remaining, %d-minute total cap); it never extends the chat.' % (progress['controllerExtensionsRemaining'], MAX_TOTAL_MINUTES))
+                      ' (%d remaining; the %d-minute total includes the initial limit%s); it never extends the chat.'
+                      % (progress['controllerExtensionsRemaining'], MAX_TOTAL_MINUTES,
+                         '' if capacity is None else ', so at most %d more minutes' % (capacity // 60)))
     result = dict(result)
     result.update(status=state.get('status'), progress=progress)
     result['progressSummary'] = source + ' ' + limits + ' ' + selected + ' ' + clock
@@ -870,7 +881,7 @@ class Job:
         return result
 
     def write_sources(self, files):
-        require(self.state['writes'] < 8, 'source revision budget exhausted')
+        require(self.state['writes'] < MAX_WRITES, 'source revision budget exhausted')
         if self.emulator is not None:
             cleanup = self.emulator.stop()
             self.event('retire_test_for_repair', 'Stop the previous guest before changing the app; its observations stay in the record.', cleanup)
@@ -897,7 +908,7 @@ class Job:
         return {'summary': 'The original Java source was written inside the isolated worker. Any earlier APK qualification is now invalid; the next step is a fresh offline build.', 'sources': manifest, 'sourceRevision': self.state['sourceRevision']}
 
     def build(self):
-        require(self.state['builds'] < 3, 'three-build budget exhausted')
+        require(self.state['builds'] < MAX_BUILDS, 'build budget exhausted')
         require(self.emulator is None, 'stop the emulator before rebuilding')
         require(not self.state.get('testRequiresRepair') or (self.state['sourceRevision'] > self.state['failedTestSourceRevision'] and self.state.get('lastWrittenSourceRevision') == self.state['sourceRevision']),
                 'the failed guest test requires a new source write before another build')
@@ -962,7 +973,7 @@ class Job:
         return self.observation_result(result, display)
 
     def extend(self, minutes, reason):
-        """Move the deadline later after verified build progress; counters stay unchanged."""
+        """Move the deadline later after verified build progress; writes and builds stay unchanged."""
         extensions = self.state.get('extensions', [])
         require(len(extensions) < MAX_EXTENSIONS, 'this job has used all %d time extensions' % MAX_EXTENSIONS)
         qualified = self.state.get('lastQualifiedBuild')
@@ -983,7 +994,7 @@ class Job:
                   'afterQualifiedBuild': qualified, 'reason': reason}
         self.update_state(extensions=extensions + [record])
         granted = seconds // 60
-        return {'summary': ('The controller deadline moved %d minutes later after verified build progress%s. Source writes, builds and actions are unchanged. '
+        return {'summary': ('The controller deadline moved %d minutes later after verified build progress%s. Source writes and builds are unchanged; this request used one work action. '
                             'This does not extend the chat’s own timeout; if the chat ends first, the controller still stops the job at its deadline.'
                             % (granted, '' if granted == minutes else ' (limited by the %d-minute total cap)' % MAX_TOTAL_MINUTES)),
                 'grantedMinutes': granted, 'requestedMinutes': minutes,
@@ -1171,7 +1182,7 @@ class Job:
         require(self.lock.acquire(False), 'another operation is active for this job')
         try:
             self.check()
-            require(self.state['actions'] < 40, 'job action budget exhausted')
+            require(self.state['actions'] < MAX_ACTIONS, 'job action budget exhausted')
             self.state['actions'] += 1
             self.requests[request_id] = {'digest': hashed, 'result': None}
             atomic(self.path / ('request-%s.json' % digest(request_id.encode())[:24]), {'requestId': request_id, 'params': params, 'status': 'reserved'})
@@ -1198,7 +1209,7 @@ class Job:
                 # keep the running test and its qualified APK for a corrected tap.
                 result.update(error.details)
             elif action == 'start_test' and self.state.get('testRequiresRepair') and self.emulator is None:
-                result['repairAllowed'] = self.state['writes'] < 8 and self.state['builds'] < 3 and self.state['actions'] <= 37
+                result['repairAllowed'] = self.state['writes'] < MAX_WRITES and self.state['builds'] < MAX_BUILDS and self.state['actions'] <= MAX_ACTIONS - 3
                 result['next'] = 'The failed guest is stopped. Write repaired source, build a new APK, then start a new test; the previous test directory is retained.'
             elif action in ('prepare', 'start_test'):
                 result['cleanup'] = self.stop('failed')
@@ -1222,7 +1233,7 @@ class Job:
                         result['repairAllowed'] = False
                         result['cleanup'] = self.stop('failed')
                     else:
-                        result['repairAllowed'] = self.state['writes'] < 8 and self.state['builds'] < 3 and self.state['actions'] <= 37
+                        result['repairAllowed'] = self.state['writes'] < MAX_WRITES and self.state['builds'] < MAX_BUILDS and self.state['actions'] <= MAX_ACTIONS - 3
                         result['next'] = ('The guest is stopped. Inspect the retained failure, repair with write_sources, build again, then start_test within the remaining budgets.'
                                           if result['repairAllowed'] else 'The guest is stopped and repair budgets are exhausted. Use stop to retire the job cache and retain its evidence.')
                 else:

@@ -1,6 +1,6 @@
 {
-  "currentRepositorySource": "stage4AP-candidate2",
-  "deployedSource": "stage4AO-final2",
+  "currentRepositorySource": "stage4AQ",
+  "deployedSource": "stage4AQ",
   "versions": [
     {
       "version": "stage4AO-final2",
@@ -42,9 +42,9 @@
         "nodeVersion": "22.22.0",
         "host": "Linux cloud container; no Studio, Docker daemon, SDK, emulator or model was used"
       },
-      "deployed": false,
-      "liveModelTrial": "NOT RUN",
-      "deploymentNote": "This publication copy keeps /CONFIGURE placeholders. A deployment must apply the reviewed diff to the installed source through the private guarded updater with fresh identity, baseline and idle-resource checks. install.py is not an update command.",
+      "deployed": true,
+      "liveModelTrial": "Exercised as part of the stage4AQ trial: uiSummary centers were used for both taps. The out-of-display refusal was not triggered.",
+      "deploymentNote": "This publication copy keeps /CONFIGURE placeholders. A deployment must apply the reviewed diff to the installed source through the private guarded updater with fresh identity, baseline and idle-resource checks. install.py is not an update command. Deployed on 2026-10-04 as part of stage4AQ.",
       "superseded": "Superseded by stage4AP-candidate2 before any deployment; its exact bytes remain in git history at commit d8059ac."
     },
     {
@@ -78,9 +78,49 @@
         "nodeVersion": "22.22.0",
         "host": "Linux cloud container; no Studio, Docker daemon, SDK, emulator or model was used"
       },
-      "deployed": false,
-      "liveModelTrial": "NOT RUN",
-      "deploymentNote": "Same as candidate 1. Extensions help only if the operator also dispatches the chat with a long enough chat.send.timeoutMs (3600000 for 60 minutes, 7200000 to allow extensions); the controller cannot extend the chat."
+      "deployed": true,
+      "liveModelTrial": "Exercised as part of the stage4AQ trial: the 60-minute default applied. extend was never called.",
+      "deploymentNote": "Same as candidate 1. Extensions help only if the operator also dispatches the chat with a long enough chat.send.timeoutMs (3600000 for 60 minutes, 7200000 to allow extensions); the controller cannot extend the chat. Deployed on 2026-10-04 as part of stage4AQ."
+    },
+    {
+      "version": "stage4AQ",
+      "parentPublicSourceManifestSha256": "8c558a70c6fc8311eed0898e7485b107d1ad78091c81265d55c533ed900f07c8",
+      "publicSourceManifestSha256": "8c65087d0443d5f629481c298744dc4a424b91ed64e93c2673f9cedd96a75026",
+      "publicSourceFiles": 45,
+      "createdOn": "2026-10-04",
+      "changedFilesFromParent": [
+        "INTEGRATION.md",
+        "bridge.py",
+        "emulator_adapter.py",
+        "plugin/index.js",
+        "plugin/test_plugin.mjs",
+        "skill/long-task-runner/SKILL.md",
+        "test_bridge.py",
+        "test_emulator_adapter.py"
+      ],
+      "changes": [
+        "android_project declares catalogMode direct-only, so OpenClaw keeps it out of the Tool Search catalog and returns its screenshots as native image blocks. Through the tool_call bridge each capture was serialized as roughly 20,000 characters of base64 text that the model could not view.",
+        "The skill now calls android_project directly and keeps tool_call only as a fallback when the tool is absent from the direct tool list.",
+        "Per-job budgets are named constants and rise from 8 writes, 3 builds and 40 actions to 20 writes, 10 builds and 120 actions. Repair eligibility after a guest failure still requires a spare write, build and three actions.",
+        "Pre-deploy review fixes: receipts stop offering extensions once the 120-minute total (which includes the initial limit) is used; a granted extension says it used one work action; the per-guest artifact cap rises from 256 to 640 files (128 MiB) so a full action budget cannot end a healthy guest; system dialogs owned by package 'android' are labelled as such in uiSummary; the tap validation error says actual display pixels instead of quoting the 0-8192 transport bound."
+      ],
+      "requestedBy": "Analysis of the October 4 counter trial transcript, and the operator's question about the three-build limit.",
+      "unchangedLimits": "Time limits and extension gate from candidate 2, worker and emulator isolation, per-call 180-second build and boot caps, model and provider checks.",
+      "fixtureTests": {
+        "python": 230,
+        "node": 47,
+        "pythonVersions": ["3.9.6", "3.14"],
+        "nodeVersion": "24.21.0",
+        "host": "Operator Mac; no Studio, Docker daemon, SDK, emulator or model was used"
+      },
+      "deployed": true,
+      "liveModelTrial": "One counter trial on 2026-10-04 passed all three behavior checks in about 14 minutes with model-issued stop, confirmed cleanup and final checkpoint readback; the model overstated the launch-frame evidence. See TEST_RESULTS.md.",
+      "deploymentNote": "Installed with a guarded updater that required the exact stage 4AO final2 files, an idle controller and passing staged and installed fixture suites; nine installed files replaced with backups, followed by a Gateway refresh. Configuration and retained jobs unchanged.",
+      "knownFollowUps": [
+        "With 10 builds, a job can keep up to 10 emulator disks under its job directory; host free space is checked only at prepare."
+      ],
+      "deployedOn": "2026-10-04",
+      "installedSourceManifestSha256": "254b323592d5e1df224b8d2791ce2af6b5d62f817285d6bbdad27e8b11b54a6e"
     }
   ]
 }

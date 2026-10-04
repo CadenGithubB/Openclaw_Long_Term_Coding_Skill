@@ -25,6 +25,12 @@ UI_NODE_LIMIT = 4000
 UI_DEPTH_LIMIT = 96
 UI_ELEMENT_LIMIT = 60
 UI_TEXT_LIMIT = 160
+# One guest session may receive every controller action (120) as a 5-file tap burst;
+# hitting this cap stops the guest, so it must stay above that, not below it.
+SESSION_ARTIFACTS = 640
+SESSION_ARTIFACT_BYTES = 128 * 1024 * 1024
+# 'android' owns system dialogs such as "isn't responding"; label it, not the app.
+SYSTEM_PACKAGE = 'android'
 PACKAGE_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+')
 BOUNDS = re.compile(r'\[(-?[0-9]{1,6}),(-?[0-9]{1,6})\]\[(-?[0-9]{1,6}),(-?[0-9]{1,6})\]')
 
@@ -75,7 +81,7 @@ def summarize_ui(raw, size, package):
             nodes += 1
             require(nodes <= UI_NODE_LIMIT, 'view tree node limit')
             owner = node.get('package', '')
-            owner = owner if len(owner) <= 120 and PACKAGE_NAME.fullmatch(owner) else ''
+            owner = owner if len(owner) <= 120 and (owner == SYSTEM_PACKAGE or PACKAGE_NAME.fullmatch(owner)) else ''
             app_present = app_present or owner == package
             if owner and owner not in packages and len(packages) < 8:
                 packages.append(owner)
@@ -196,7 +202,7 @@ class EmulatorSession:
 
     def _artifact(self, suffix, data):
         require(len(data) <= MAX_OUTPUT, 'artifact quota exceeded')
-        require(self._sequence < 256 and self._artifact_bytes + len(data) <= 64 * 1024 * 1024,
+        require(self._sequence < SESSION_ARTIFACTS and self._artifact_bytes + len(data) <= SESSION_ARTIFACT_BYTES,
                 'session artifact quota exceeded')
         self._sequence += 1
         self._artifact_bytes += len(data)

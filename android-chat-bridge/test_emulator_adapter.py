@@ -505,7 +505,7 @@ class AdapterTests(unittest.TestCase):
     def test_artifact_budget_rejects_additional_capture(self):
         session = self.session()
         session.start()
-        session._artifact_bytes = 64 * 1024 * 1024
+        session._artifact_bytes = adapter.SESSION_ARTIFACT_BYTES
         with self.assertRaisesRegex(adapter.EmulatorError, 'session artifact quota'):
             session.observe()
         self.assertEqual(session.stop()['status'], 'stopped')
@@ -590,6 +590,20 @@ class AdapterTests(unittest.TestCase):
         self.assertIn('dumpStartedAtMs', launch['ui'])
         self.assertEqual(Path(launch['ui']['path']).read_bytes(), COUNTER)
         self.assertNotIn('passed', json.dumps(summary))
+
+    def test_artifact_cap_covers_a_full_action_budget_of_tap_bursts(self):
+        # start_test writes 4 files and a burst tap at most 5; the cap must not end a healthy guest.
+        self.assertGreaterEqual(adapter.SESSION_ARTIFACTS, 4 + 5 * 120)
+
+    def test_system_dialog_controls_are_labelled_as_the_android_package(self):
+        raw = (b'<hierarchy rotation="0"><node index="0" text="" class="android.widget.FrameLayout" package="android" '
+               b'bounds="[0,0][480,800]"><node index="0" text="Close app" class="android.widget.Button" package="android" '
+               b'clickable="true" bounds="[40,400][440,460]" /></node></hierarchy>')
+        summary = adapter.summarize_ui(raw, (480, 800), 'org.openclaw.trial')
+        self.assertEqual(summary['packages'], ['android'])
+        self.assertFalse(summary['appPackagePresent'])
+        close = next(item for item in summary['elements'] if item.get('text') == 'Close app')
+        self.assertEqual(close['package'], 'android')
 
     def test_tap_receipt_includes_tree_captured_after_its_after_frame(self):
         session = self.session()

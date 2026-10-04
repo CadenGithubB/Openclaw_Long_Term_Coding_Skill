@@ -71,6 +71,9 @@ test('main tool registration is optional, sequential and uses no conversation ho
   assert.equal(plugin.id, 'android-chat-bridge');
   assert.deepEqual(options, { names: ['android_project'], optional: true });
   assert.equal(factory(CONTEXT).executionMode, 'sequential');
+  // Tool Search's tool_call bridge turns image blocks into base64 text.
+  assert.equal(factory(CONTEXT).catalogMode, 'direct-only');
+  assert.match(factory(CONTEXT).description, /Call android_project directly/);
   assert.equal(factory({ agentId: 'main' }).name, 'android_project');
   assert.equal(factory({ ...CONTEXT, agentId: 'devlab' }), null);
   assert.match(factory(CONTEXT).description, /read the available long-task-runner skill/);
@@ -260,6 +263,8 @@ test('tap limits and action-specific fields cannot be bypassed', () => {
   for (const patch of [{ x: -1 }, { x: 1.1 }, { x: Number.MAX_SAFE_INTEGER + 1 }, { x: 8193 }, { y: 8193 }, { y: '3' }, { count: 0 }, { count: 31 }, { intervalMs: 79 }, { intervalMs: 1501 }]) {
     assert.throws(() => validateParams({ ...tap, ...patch }), /coordinates|count|interval/);
   }
+  // The 0-8192 bound is only a transport limit; quoting it led to a scaled out-of-display tap.
+  assert.throws(() => validateParams({ ...tap, x: 240.5 }), error => /actual pixels/.test(error.message) && !/8192/.test(error.message));
   assert.throws(() => validateParams({ action: 'prepare', jobId: JOB }), /does not apply/);
   assert.throws(() => validateParams({ action: 'build' }), /jobId is required/);
   assert.throws(() => validateParams({ action: 'build', jobId: 'am-../bad' }), /invalid jobId/);

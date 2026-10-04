@@ -75,11 +75,12 @@ below do not apply to this route. Do not probe host paths or spawn another write
 6. **Leave time to finish safely.** Read receipt counters, source qualification
    and remaining controller time when provided. The chat/runtime deadline may
    already be fixed and shorter; choosing a job budget does not extend the current
-   chat. Keep the original job and selected time limit, with at most eight writes,
-   three builds and forty actions. If verified work remains after a new
+   chat. Keep the original job and selected time limit, with at most 20 writes,
+   10 builds and 120 actions. If verified work remains after a new
    successful build, `extend` may add 5–30 controller minutes. Give a `reason`
    naming the remaining checks. It allows at most three grants and 120 minutes in
-   total, and adds no chat time, writes, builds or actions. A refused extension
+   total including the initial limit; it adds no chat time, writes or builds, and
+   each request uses one action. A refused extension
    means finishing or stopping within the remaining time. Do not reset budgets,
    create automatic continuation loops or change global configuration to gain
    time. Before lengthy generation,
@@ -88,22 +89,27 @@ below do not apply to this route. Do not probe host paths or spawn another write
    Finish with verified progress, remaining checks and cleanup state.
 
 Use the returned `jobId` for `write_sources`, `build`, `start_test`, `tap`,
-`observe`, `extend`, `status` and `stop`, following the discovered schemas. With `tool_call`,
-keep `id` outside `args` and Android parameters inside it:
+`observe`, `extend`, `status` and `stop`. `android_project` is a direct tool in
+your tool list: call it by name with its parameters, not through `tool_call`, so
+its screenshots arrive as images you can inspect:
 
 ```json
-{"id":"android_project","args":{"action":"prepare","timeLimitMinutes":60,"reason":"Check the prepared offline tools and create a clean project before writing the app."}}
+{"action":"prepare","timeLimitMinutes":60,"reason":"Check the prepared offline tools and create a clean project before writing the app."}
 ```
 
-Keep `args` as a JSON object, never a serialized string, and include `action` in
-every call. This source-write example is structural; replace both placeholders
-with the returned job ID and complete original Java source:
+Include `action` in every call. This source-write example is structural; replace
+both placeholders with the returned job ID and complete original Java source:
 
 ```json
-{"id":"android_project","args":{"action":"write_sources","jobId":"<returned jobId>","files":[{"name":"MainActivity.java","content":"<complete original Java source>"}],"reason":"Write the app using the prepared Android project."}}
+{"action":"write_sources","jobId":"<returned jobId>","files":[{"name":"MainActivity.java","content":"<complete original Java source>"}],"reason":"Write the app using the prepared Android project."}
 ```
 
-If wrapper validation rejects a call before execution, correct its envelope,
+Only if `android_project` is absent from your direct tools, call it through
+`tool_call` with `id` outside `args` and these parameters inside it as a JSON
+object; screenshots then arrive as text and cannot be viewed, so rely on
+`uiSummary` and say so in the report.
+
+If validation rejects a call before execution, correct its envelope,
 retaining the job and intended source; do not rewrite the app or repeat
 `prepare` for that error. `write_sources` retires a previous guest and invalidates
 the old APK qualification, so changed source must be rebuilt and retested.
