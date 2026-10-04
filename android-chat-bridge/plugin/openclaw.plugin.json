@@ -1,0 +1,17 @@
+{
+  "id": "android-chat-bridge",
+  "name": "Offline Android projects",
+  "version": "0.1.0",
+  "description": "Build and inspect Android apps through a confined offline worker and a private emulator.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": ["android_project"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

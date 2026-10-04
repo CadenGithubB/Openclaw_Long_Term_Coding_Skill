@@ -1,0 +1,19 @@
+{
+  "eventType": "decision_recorded",
+  "decisionId": "save-note",
+  "supersedes": null,
+  "payload": {
+    "title": "EXAMPLE ONLY: Persist notes",
+    "category": "app_behavior",
+    "problem": "Edited notes must survive relaunch.",
+    "chosenApproach": "Persist when leaving the editor.",
+    "statedRationale": "The requested interface has no Save button.",
+    "rationaleAvailability": "recorded",
+    "documentedAlternatives": [],
+    "expectedOutcome": "Edited notes survive relaunch.",
+    "knownTradeoffs": [],
+    "openQuestions": ["Process death behavior has not been checked."],
+    "criterionIds": ["notes-persistence"],
+    "evidenceRefs": []
+  }
+}

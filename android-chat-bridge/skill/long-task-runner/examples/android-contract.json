@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "request": "EXAMPLE ONLY: Build an Android notes application in the authorized development environment. Verify creating, editing and persisting notes across relaunch on Android.",
+  "criteria": [
+    {
+      "id": "source",
+      "check": "Requested application source exists and passes its supported syntax checks.",
+      "requiredLevels": [
+        "source",
+        "syntax"
+      ],
+      "artifactId": "source-tree",
+      "environmentId": "build-worker"
+    },
+    {
+      "id": "android-build",
+      "check": "Produce the requested installable Android application.",
+      "requiredLevels": [
+        "build"
+      ],
+      "artifactId": "apk",
+      "environmentId": "build-worker"
+    },
+    {
+      "id": "android-launch",
+      "check": "Install and launch this exact application in the prepared Android emulator.",
+      "requiredLevels": [
+        "launch"
+      ],
+      "artifactId": "apk",
+      "environmentId": "android-emulator"
+    },
+    {
+      "id": "notes-persistence",
+      "check": "Create and edit a note, relaunch the Android app and verify the saved contents persist.",
+      "requiredLevels": [
+        "behavior"
+      ],
+      "artifactId": "apk",
+      "environmentId": "android-emulator"
+    }
+  ]
+}

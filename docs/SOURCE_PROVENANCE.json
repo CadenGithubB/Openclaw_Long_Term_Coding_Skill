@@ -1,0 +1,16 @@
+{
+  "originVersion": "stage4AO-final2",
+  "originalPrivateSourceManifestSha256": "d214381bcd99ca39c3b086ee52650a5f73bf355eff1cafbffb35fe922dcba31e",
+  "publicSourceManifestSha256": "e088143b83c78e5e1c6844cd37d82893ebc91584b51e565dfd1974014896f835",
+  "publicSourceFiles": 45,
+  "publicationRedactedFiles": [
+    "bridge.py",
+    "emulator_adapter.py",
+    "install.py",
+    "plugin/index.js",
+    "test_bridge.py",
+    "plugin/test_plugin.mjs"
+  ],
+  "redactions": "Service-account paths and account names replaced with explicit configuration placeholders; original volume identity and marker removed. No production paths or original identity values are supplied in this record. The plugin test uses the platform temporary directory and a generic outside-path fixture.",
+  "deployedSourceChanged": false
+}

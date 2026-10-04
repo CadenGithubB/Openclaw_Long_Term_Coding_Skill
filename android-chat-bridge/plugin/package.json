@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-android-chat-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Narrow offline Android project tools for normal OpenClaw chat.",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
+  "scripts": {
+    "test": "node --test test_plugin.mjs"
+  }
+}

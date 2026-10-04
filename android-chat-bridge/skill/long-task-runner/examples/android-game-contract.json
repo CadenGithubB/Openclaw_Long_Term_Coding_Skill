@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "request": "EXAMPLE ONLY: Build an original Android game in the authorized development sandbox, install an Android emulator, and test the application there.",
+  "criteria": [
+    {"id":"source","check":"Original game source exists and is reviewed within the authorized project.","requiredLevels":["source","syntax"],"artifactId":"source-tree","environmentId":"build-worker"},
+    {"id":"android-build","check":"Produce the requested installable Android application.","requiredLevels":["build"],"artifactId":"apk","environmentId":"build-worker"},
+    {"id":"android-launch","check":"Install and launch this exact application in the prepared Android emulator.","requiredLevels":["launch"],"artifactId":"apk","environmentId":"android-emulator"},
+    {"id":"gameplay","check":"Exercise input, movement, collisions, scoring and restart in Android.","requiredLevels":["behavior"],"artifactId":"apk","environmentId":"android-emulator"}
+  ]
+}
